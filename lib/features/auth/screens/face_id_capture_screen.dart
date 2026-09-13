@@ -5,6 +5,7 @@ import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 
 import '../../../services/security/face_detection_service.dart';
+import '../../../services/security/face_embedding_service.dart';
 import '../../../services/security/face_id_config.dart';
 import '../../../services/security/face_id_service.dart';
 import '../../../services/security/face_liveness_checker.dart';
@@ -45,11 +46,25 @@ class _FaceIdCaptureScreenState extends State<FaceIdCaptureScreen>
   DateTime? _cooldownUntil;
   Timer? _cooldownTicker;
 
+  // Session timing + single-flight bookkeeping.
+  final Stopwatch _screenSw = Stopwatch()..start();
+  bool _firstFrameLogged = false;
+  bool _loopRunning = false;
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _warmMl();
     _initCamera();
+  }
+
+  /// Preloads the ML runtime off the critical path while the camera spins
+  /// up, so the first capture doesn't pay the interpreter-load cost.
+  Future<void> _warmMl() async {
+    if (!FaceIdConfig.isSupportedPlatform) return;
+    _detector.detector; // construct the detector once
+    await FaceEmbeddingService.loadContract();
   }
 
   @override
@@ -106,8 +121,11 @@ class _FaceIdCaptureScreenState extends State<FaceIdCaptureScreen>
       return;
     }
 
+    // Low resolution is plenty: the face fills the oval, ML Kit detects at
+    // this size, and the 112×112 probe doesn't need 4K. The smaller frames
+    // make capture + decode + inference much faster with no accuracy loss.
     final controller =
-        CameraController(cam, ResolutionPreset.medium, enableAudio: false);
+        CameraController(cam, ResolutionPreset.low, enableAudio: false);
 
     try {
       await controller.initialize();
@@ -134,6 +152,7 @@ class _FaceIdCaptureScreenState extends State<FaceIdCaptureScreen>
       return;
     }
     _controller = controller;
+    debugPrint('PyloFaceTiming camera_ready=${_screenSw.elapsedMilliseconds}ms');
     setState(() {
       _initializing = false;
       _statusMessage = widget.mode == FaceIdCaptureMode.enroll
@@ -148,21 +167,35 @@ class _FaceIdCaptureScreenState extends State<FaceIdCaptureScreen>
   // -----------------------------------------------------------------------
 
   Future<void> _startAutoCapture() async {
-    while (!_finished) {
-      await Future.delayed(
-        widget.mode == FaceIdCaptureMode.enroll
-            ? FaceIdConfig.enrollSampleGap
-            : FaceIdConfig.authCaptureGap,
-      );
-      if (_finished || _controller == null) continue;
-      if (widget.mode == FaceIdCaptureMode.authenticate &&
-          _cooldownUntil != null) {
-        continue;
+    if (_loopRunning) return;
+    _loopRunning = true;
+    try {
+      while (!_finished) {
+        if (_controller == null || !_controller!.value.isInitialized) {
+          await Future.delayed(const Duration(milliseconds: 50));
+          continue;
+        }
+        if (widget.mode == FaceIdCaptureMode.authenticate &&
+            _cooldownUntil != null) {
+          await Future.delayed(const Duration(milliseconds: 250));
+          continue;
+        }
+        // Single-flight: never queue a second capture while one is in
+        // flight. Skip == drop stale frames; the latest frame wins.
+        if (_processingFrame || _controller!.value.isTakingPicture) {
+          await Future.delayed(const Duration(milliseconds: 40));
+          continue;
+        }
+        // Capture immediately, then pace the next attempt between cycles.
+        await _attemptCapture();
+        await Future.delayed(
+          widget.mode == FaceIdCaptureMode.enroll
+              ? FaceIdConfig.enrollSampleGap
+              : FaceIdConfig.authCaptureGap,
+        );
       }
-      // Frame throttling: never queue up a second capture while the
-      // previous frame is still being processed.
-      if (_processingFrame) continue;
-      await _attemptCapture();
+    } finally {
+      _loopRunning = false;
     }
   }
 
@@ -193,12 +226,19 @@ class _FaceIdCaptureScreenState extends State<FaceIdCaptureScreen>
   /// loop simply retries on the next tick.
   Future<_CaptureAndLiveness?> _runCapturePipeline(
       CameraController controller) async {
+    final sw = Stopwatch()..start();
     try {
       final file = await controller.takePicture();
+      if (!_firstFrameLogged) {
+        _firstFrameLogged = true;
+        debugPrint(
+            'PyloFaceTiming first_frame=${_screenSw.elapsedMilliseconds}ms');
+      }
       final result = await FaceIdService.processCapture(
         jpegPath: file.path,
         detectorService: _detector,
       );
+      debugPrint('PyloFaceTiming cycle=${sw.elapsedMilliseconds}ms');
       return _CaptureAndLiveness(result);
     } catch (e) {
       debugPrint('Face capture pipeline failed: $e');
@@ -285,7 +325,9 @@ class _FaceIdCaptureScreenState extends State<FaceIdCaptureScreen>
   }
 
   Future<void> _scoreAndRoute(Float32List embedding) async {
+    final sw = Stopwatch()..start();
     final match = await FaceIdService.matchAgainstStoredTemplate(embedding);
+    debugPrint('PyloFaceTiming match=${sw.elapsedMilliseconds}ms');
     if (_finished || !mounted) return;
 
     if (match.matched) {

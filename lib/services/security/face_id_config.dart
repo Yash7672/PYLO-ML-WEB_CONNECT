@@ -68,8 +68,10 @@ abstract final class FaceIdConfig {
   // Authentication
   // -------------------------------------------------------------------------
 
-  /// Pause between attempted captures during unlock.
-  static const Duration authCaptureGap = Duration(milliseconds: 900);
+  /// Pause between attempted captures during unlock. Intentionally short —
+  /// the single-flight loop drops stale frames, so this only paces how
+  /// quickly the next attempt starts after the previous one finishes.
+  static const Duration authCaptureGap = Duration(milliseconds: 200);
 
   /// After this many consecutive failed unlock attempts the camera locks out.
   static const int maxAuthAttempts = 5;

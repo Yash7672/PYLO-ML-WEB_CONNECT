@@ -59,15 +59,16 @@ class FaceProcessingResult {
 // Isolate work (top-level so compute() can reach it)
 // ---------------------------------------------------------------------------
 
-/// Message passed into the isolate for face alignment.
+/// Message passed into the isolate for face alignment. The image travels as
+/// raw RGB bytes (no PNG encode/decode round-trip) plus its dimensions.
 class _AlignFaceRequest {
-  final Uint8List imageBytes; // upright PNG bytes — no EXIF
+  final Uint8List rgbBytes; // upright RGB row-major bytes
   final int leftEyeX, leftEyeY;
   final int rightEyeX, rightEyeY;
   final int imageWidth, imageHeight;
 
   const _AlignFaceRequest({
-    required this.imageBytes,
+    required this.rgbBytes,
     required this.leftEyeX,
     required this.leftEyeY,
     required this.rightEyeX,
@@ -77,13 +78,17 @@ class _AlignFaceRequest {
   });
 }
 
-/// Runs in a background isolate: decodes, rotates, crops, resizes and
-/// normalizes a face probe into the [112×112×3] pixel array the model
-/// expects.  Returns null on any failure.
+/// Runs in a background isolate: builds the upright image from raw RGB
+/// bytes, rotates, crops, resizes and normalizes a face probe into the
+/// [112×112×3] pixel array the model expects.  Returns null on any failure.
 Float32List? _alignAndNormalize(_AlignFaceRequest req) {
   try {
-    final decoded = img.decodeImage(req.imageBytes);
-    if (decoded == null) return null;
+    final decoded = img.Image.fromBytes(
+      width: req.imageWidth,
+      height: req.imageHeight,
+      bytes: req.rgbBytes.buffer,
+      numChannels: 3,
+    );
 
     final eyeDist = math.max(
       1,
@@ -196,6 +201,7 @@ class FaceIdService {
     required String jpegPath,
     required FaceDetectionService detectorService,
   }) async {
+    final sw = Stopwatch()..start();
     try {
       final bytes = await File(jpegPath).readAsBytes();
       final decoded = img.decodeImage(bytes);
@@ -212,6 +218,7 @@ class FaceIdService {
 
       final inputImage = InputImage.fromFilePath(jpegPath);
       final faces = await detectorService.detectFromImage(inputImage);
+      debugPrint('PyloFaceTiming detect=${sw.elapsedMilliseconds}ms');
 
       if (faces.isEmpty) {
         return const FaceProcessingResult.noFace();
@@ -257,10 +264,11 @@ class FaceIdService {
             .failure('Keep your face straight');
       }
 
+      // Send raw RGB bytes to the isolate — avoids encoding+decoding PNG.
       final aligned = await compute(
         _alignAndNormalize,
         _AlignFaceRequest(
-          imageBytes: img.encodePng(upright),
+          rgbBytes: upright.getBytes(order: img.ChannelOrder.rgb),
           leftEyeX: leftEye.x,
           leftEyeY: leftEye.y,
           rightEyeX: rightEye.x,
@@ -269,11 +277,13 @@ class FaceIdService {
           imageHeight: upright.height,
         ),
       );
+      debugPrint('PyloFaceTiming align=${sw.elapsedMilliseconds}ms');
       if (aligned == null) {
         return const FaceProcessingResult.failure('Could not align face');
       }
 
       final embedding = await FaceEmbeddingService.embedPixels(aligned);
+      debugPrint('PyloFaceTiming embed=${sw.elapsedMilliseconds}ms');
       if (embedding == null) {
         return const FaceProcessingResult
             .failure('Model inference failed');
@@ -286,6 +296,7 @@ class FaceIdService {
     } finally {
       // Privacy: best-effort clean up the temp capture file.
       try { await File(jpegPath).delete(); } catch (_) {}
+      debugPrint('PyloFaceTiming pipeline_total=${sw.elapsedMilliseconds}ms');
     }
   }
 

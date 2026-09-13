@@ -12,12 +12,22 @@ class FaceDetectionService {
   FaceDetector? _detector;
 
   /// The detector instance for this service (created lazily).
+  ///
+  /// Tuned for speed:
+  ///  * [FaceDetectorMode.fast] — skips the expensive accurate-mode face
+  ///    alignment/contour pipeline.
+  ///  * [enableLandmarks] stays ON because eye landmarks drive face
+  ///    alignment for the MobileFaceNet probe, head-pose gating, and the
+  ///    head-motion liveness fallback.
+  ///  * [enableClassification] is OFF — the blink-based liveness signal is
+  ///    dropped in favor of head-motion liveness so classification (an
+  ///    expensive per-face network) never runs.
   FaceDetector get detector =>
       _detector ??= FaceDetector(
         options: FaceDetectorOptions(
-          performanceMode: FaceDetectorMode.accurate,
+          performanceMode: FaceDetectorMode.fast,
           enableLandmarks: true,
-          enableClassification: true,
+          enableClassification: false,
         ),
       );
 
