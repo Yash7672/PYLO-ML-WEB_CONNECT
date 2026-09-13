@@ -11,6 +11,7 @@ import '../../../services/security/face_liveness_checker.dart';
 import '../../../services/security/face_matching_service.dart';
 import '../../../services/security/face_template_store.dart';
 import '../../../theme/app_theme.dart';
+import '../widgets/face_id_camera_alignment.dart';
 
 enum FaceIdCaptureMode { enroll, authenticate }
 
@@ -340,61 +341,6 @@ class _FaceIdCaptureScreenState extends State<FaceIdCaptureScreen>
   }
 
   // -----------------------------------------------------------------------
-  // Preview — finite, constrained, clipped
-  // -----------------------------------------------------------------------
-
-  /// Builds the camera preview inside the oval mask. Always wrapped in a
-  /// fixed-size [SizedBox] so [ClipOval]/[FittedBox]/[CameraPreview] all
-  /// receive finite constraints (never an infinite/unlaid-out parent).
-  Widget _buildPreview(CameraController camera) {
-    if (!camera.value.isInitialized) {
-      return const Center(
-        child: CircularProgressIndicator(color: Colors.white),
-      );
-    }
-    final previewSize = camera.value.previewSize;
-    // The camera package reports preview dims in the sensor's native
-    // (landscape-ish) frame; the actual screen orientation we render is
-    // portrait, so the texture is likewise landscape.
-    final camW = previewSize?.height.toDouble() ?? 1.0;
-    final camH = previewSize?.width.toDouble() ?? 1.0;
-
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final maxW = constraints.maxWidth.isFinite
-            ? constraints.maxWidth
-            : MediaQuery.of(context).size.width;
-        final maxH = constraints.maxHeight.isFinite
-            ? constraints.maxHeight
-            : MediaQuery.of(context).size.height;
-
-        // Ellipse matching the painted oval guide, centered in the frame.
-        final ovalW = maxW * 0.68;
-        final ovalH = ovalW * 1.25;
-
-        return Center(
-          child: SizedBox(
-            width: ovalW,
-            height: ovalH,
-            child: ClipOval(
-              clipBehavior: Clip.hardEdge,
-              child: FittedBox(
-                fit: BoxFit.cover,
-                clipBehavior: Clip.hardEdge,
-                child: SizedBox(
-                  width: camW,
-                  height: camH,
-                  child: CameraPreview(camera),
-                ),
-              ),
-            ),
-          ),
-        );
-      },
-    );
-  }
-
-  // -----------------------------------------------------------------------
   // Build
   // -----------------------------------------------------------------------
 
@@ -410,11 +356,11 @@ class _FaceIdCaptureScreenState extends State<FaceIdCaptureScreen>
         child: Stack(
           fit: StackFit.expand,
           children: [
-            // Camera preview (only ever shown once the controller is
-            // initialized — never a half-built preview).
+            // Camera area — outer alignment oval + oval camera preview. The
+            // geometry is owned entirely by [FaceIdCameraAlignment].
             if (showPreview)
               Positioned.fill(
-                child: _buildPreview(camera),
+                child: FaceIdCameraAlignment(camera: camera),
               ),
 
             // Loading spinner while the camera initializes.
@@ -422,9 +368,6 @@ class _FaceIdCaptureScreenState extends State<FaceIdCaptureScreen>
               const Center(
                 child: CircularProgressIndicator(color: Colors.white),
               ),
-
-            // Oval overlay guide.
-            if (showPreview) CustomPaint(painter: _OvalGuidePainter()),
 
             // Status badge.
             Positioned(
@@ -525,28 +468,4 @@ class _FaceIdCaptureScreenState extends State<FaceIdCaptureScreen>
 class _CaptureAndLiveness {
   final FaceProcessingResult result;
   const _CaptureAndLiveness(this.result);
-}
-
-// ---------------------------------------------------------------------------
-// Oval overlay painter
-// ---------------------------------------------------------------------------
-
-class _OvalGuidePainter extends CustomPainter {
-  @override
-  void paint(Canvas canvas, Size size) {
-    final center = Offset(size.width / 2, size.height * 0.38);
-    final ovalW = size.width * 0.68;
-    final ovalH = ovalW * 1.25;
-    final paint = Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 2.5
-      ..color = Colors.white38;
-    canvas.drawOval(
-      Rect.fromCenter(center: center, width: ovalW, height: ovalH),
-      paint,
-    );
-  }
-
-  @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
