@@ -22,16 +22,18 @@ class _FocusScreenState extends ConsumerState<FocusScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final focus = ref.watch(focusProvider);
+    // Select only what the shell needs: during an active session the provider
+    // emits a new FocusState on every minute boundary; slicing keeps this
+    // screen from rebuilding 60×/h for time that only FocusTimer displays.
+    final isLoading = ref.watch(focusProvider.select((s) => s.isLoading));
+    final active = ref.watch(focusProvider.select((s) => s.active));
 
-    if (focus.isLoading) {
+    if (isLoading) {
       return Scaffold(
         appBar: AppBar(title: const Text('Focus Mode')),
         body: const Center(child: CircularProgressIndicator()),
       );
     }
-
-    final active = focus.active;
     if (active != null && !_navigatedToActive) {
       _navigatedToActive = true;
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -309,7 +311,10 @@ class _SetupViewState extends ConsumerState<_SetupView> {
                         border: OutlineInputBorder(),
                         suffixText: 'min',
                       ),
-                      onChanged: (_) => setState(() {}),
+                      // No onChanged → no setState: the parsed value is only
+                      // read when the user taps Start (_startFocus), so a
+                      // per-keystroke rebuild of the entire setup form is pure
+                      // waste (it rebuilds the task dropdown + mode cards).
                     ),
                   ],
                 ],

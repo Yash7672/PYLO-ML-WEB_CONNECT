@@ -152,7 +152,10 @@ class BirthdayNotifier extends StateNotifier<AsyncValue<List<Birthday>>> {
     // the list is populated before scheduling — otherwise reboot-time reminder
     // rescheduling would silently skip every birthday.
     await loadBirthdays();
-    for (final birthday in _current) {
+    // Each birthday schedule cancels 24 notification ids before re-scheduling;
+    // run the per-birthday work concurrently so startup isn't a serial chain
+    // of platform-channel round-trips.
+    await Future.wait(_current.map((birthday) async {
       try {
         await NotificationHelper.scheduleBirthdayReminders(
           birthdayId: birthday.id,
@@ -165,6 +168,6 @@ class BirthdayNotifier extends StateNotifier<AsyncValue<List<Birthday>>> {
       } catch (e) {
         debugPrint('Failed to reschedule birthday ${birthday.id}: $e');
       }
-    }
+    }));
   }
 }

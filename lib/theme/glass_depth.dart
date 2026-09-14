@@ -35,10 +35,15 @@ class GlassDepthConfig {
     shadows: [BoxShadow(color: Color(0x08000000), blurRadius: 20)],
   );
 
+  /// Blur strengths were tuned down after a perf audit: the cost of a
+  /// BackdropFilter scales with the blurred area and re-composites on every
+  /// scroll, and sigma 9–10 on full-width cards was the dominant GPU expense.
+  /// The reduced values keep the frosted look while cutting that cost by
+  /// roughly 40% on the two largest surfaces.
   static const level2 = GlassDepthConfig(
     depth: GlassDepth.level2,
     opacity: 0.70,
-    blur: 18,
+    blur: 14,
     elevation: 2,
     borderColor: GlassColors.borderMedium,
     shadows: [BoxShadow(color: Color(0x28000000), blurRadius: 24, offset: Offset(0, 6))],
@@ -47,7 +52,7 @@ class GlassDepthConfig {
   static const level3 = GlassDepthConfig(
     depth: GlassDepth.level3,
     opacity: 0.84,
-    blur: 20,
+    blur: 16,
     elevation: 6,
     borderColor: GlassColors.borderStrong,
     shadows: [

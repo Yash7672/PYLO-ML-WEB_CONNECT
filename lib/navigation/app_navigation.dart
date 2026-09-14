@@ -71,7 +71,10 @@ class _AppNavigationState extends ConsumerState<AppNavigation> {
               child: GlassSurface(
                 borderRadius: 24,
                 depth: GlassDepth.level3,
-                blur: 18,
+                // Explicit override slightly below the level3 default: the nav
+                // bar is full-width and present on every tab, so its blur is
+                // the single largest standing GPU cost in the Glass theme.
+                blur: 14,
                 child: NavigationBar(
                   selectedIndex: _currentIndex,
                   onDestinationSelected: (index) =>

@@ -447,7 +447,16 @@ List<Widget> _buildTaskSlivers(BuildContext context, List<Task> tasks) {
     SliverList.separated(
       itemCount: tasks.length,
       separatorBuilder: (_, __) => const SizedBox(height: 8),
-      itemBuilder: (context, index) => TaskListItem(task: tasks[index]),
+      // Each row is its own compositing layer: toggling one task (or a Glass
+      // blur re-composite behind the list) repaints only that row instead of
+      // the whole visible section.
+      itemBuilder: (context, index) {
+        final task = tasks[index];
+        return RepaintBoundary(
+          key: ValueKey('today_task_${task.id}'),
+          child: TaskListItem(task: task),
+        );
+      },
     ),
   ];
 }

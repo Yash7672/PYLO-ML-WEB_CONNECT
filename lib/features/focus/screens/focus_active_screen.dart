@@ -191,8 +191,12 @@ class _FocusActiveScreenState extends ConsumerState<FocusActiveScreen>
 
   @override
   Widget build(BuildContext context) {
-    final focus = ref.watch(focusProvider);
-    final active = focus.active;
+    // Slice the watch: the provider emits once per minute during a session,
+    // and `active` keeps a stable identity between ticks, so this screen stops
+    // rebuilding 60×/h for time that only FocusTimer renders.
+    final active = ref.watch(focusProvider.select((s) => s.active));
+    final lockTaskUnavailable =
+        ref.watch(focusProvider.select((s) => s.lockTaskUnavailable));
     final theme = Theme.of(context);
 
     if (active == null && !_navigatedBack) {
@@ -266,7 +270,7 @@ class _FocusActiveScreenState extends ConsumerState<FocusActiveScreen>
                       color: theme.colorScheme.onSurfaceVariant,
                     ),
                   ),
-                  if (isStrict && focus.lockTaskUnavailable) ...[
+                  if (isStrict && lockTaskUnavailable) ...[
                     const SizedBox(height: 12),
                     Container(
                       padding: const EdgeInsets.symmetric(

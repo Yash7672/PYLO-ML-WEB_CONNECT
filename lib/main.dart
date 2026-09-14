@@ -158,31 +158,18 @@ class _TaskFlowAppState extends ConsumerState<TaskFlowApp>
     if (!kIsWeb) {
       sw.reset();
 
-      // Notification init, birthday reschedule, and widget init run concurrently.
-      // Note: no HomeWidgetService.pushNow() here — the task/habit providers
-      // load immediately after startup and their debounced _flush() already
-      // pushes widget data once. An explicit push would double the writes.
-      final prefs = ref.read(settingsPreferencesProvider);
+      // Fast init path first: notifications plugin + widget bridge only, then
+      // present any cold-start alarm immediately. The heavier reminder re-arm
+      // below runs afterwards in the background and must never gate the
+      // alarm UI on launch.
       await Future.wait([
         NotificationHelper.init().catchError((e) {
           if (kDebugMode) debugPrint('NotificationHelper init failed: $e');
         }),
-        if (prefs.birthdayRemindersEnabled)
-          ref.read(birthdayProvider.notifier).rescheduleAllReminders().catchError((e) {
-            if (kDebugMode) debugPrint('Birthday reschedule failed: $e');
-          }),
-        if (prefs.notificationsEnabled)
-          ref
-              .read(taskProvider.notifier)
-              .rescheduleAllTaskReminders()
-              .catchError((e) {
-            if (kDebugMode) debugPrint('Task reminder reschedule failed: $e');
-          }),
         HomeWidgetService.init().catchError((e) {
           if (kDebugMode) debugPrint('HomeWidget init failed: $e');
         }),
       ]);
-      debugPrint('PYLO_Init milestone: initializers done (${sw.elapsedMilliseconds}ms)');
 
       // Cold start: the app was launched directly by a legacy alarm's
       // full-screen intent (already pushed above via the stream on warm
@@ -194,6 +181,26 @@ class _TaskFlowAppState extends ConsumerState<TaskFlowApp>
       } else {
         debugPrint('PYLO_ColdStart no pending alarm to present');
       }
+
+      // Background reminder re-arm (task + birthday reschedule in parallel).
+      // Note: no HomeWidgetService.pushNow() here — the task/habit providers
+      // load immediately after startup and their debounced _flush() already
+      // pushes widget data once. An explicit push would double the writes.
+      final prefs = ref.read(settingsPreferencesProvider);
+      await Future.wait([
+        if (prefs.birthdayRemindersEnabled)
+          ref.read(birthdayProvider.notifier).rescheduleAllReminders().catchError((e) {
+            if (kDebugMode) debugPrint('Birthday reschedule failed: $e');
+          }),
+        if (prefs.notificationsEnabled)
+          ref
+              .read(taskProvider.notifier)
+              .rescheduleAllTaskReminders()
+              .catchError((e) {
+            if (kDebugMode) debugPrint('Task reminder reschedule failed: $e');
+          }),
+      ]);
+      debugPrint('PYLO_Init milestone: initializers done (${sw.elapsedMilliseconds}ms)');
 
       StartupBenchmark
           .mark('notifications_initialized (${sw.elapsedMilliseconds}ms)');

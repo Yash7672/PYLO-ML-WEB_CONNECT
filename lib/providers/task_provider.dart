@@ -359,8 +359,14 @@ try {
     // construction-time load) so reminders are never (re)built from empty
     // state on a cold start.
     await loadTasks();
-    for (final task in _currentTasks) {
-      if (task.isCompleted || task.isArchived || task.isDeleted) continue;
+    // Schedule every task in parallel: zonedSchedule is a platform-channel
+    // round-trip, so a serial loop of N tasks serializes N++ round-trips at
+    // startup. Concurrent scheduling cuts that wall-clock time dramatically
+    // on devices with many reminders.
+    final tasks = _currentTasks
+        .where((t) => !t.isCompleted && !t.isArchived && !t.isDeleted)
+        .toList();
+    await Future.wait(tasks.map((task) async {
       try {
         final taskDateTime = task.startTime ??
             DateTime(task.dueDate.year, task.dueDate.month, task.dueDate.day,
@@ -384,22 +390,27 @@ try {
       } catch (e) {
         debugPrint('Failed to reschedule reminders for ${task.id}: $e');
       }
-    }
+    }));
   }
 
   /// Withdraws every pending task notification. Used when the "Task
   /// reminders" master switch is turned off.
   Future<void> cancelAllTaskReminders() async {
-    for (final task in _currentTasks) {
-      if (task.isCompleted || task.isArchived || task.isDeleted) continue;
-      if (task.reminderMinutes.isEmpty) continue;
+    final tasks = _currentTasks
+        .where((t) =>
+            !t.isCompleted &&
+            !t.isArchived &&
+            !t.isDeleted &&
+            t.reminderMinutes.isNotEmpty)
+        .toList();
+    await Future.wait(tasks.map((task) async {
       try {
         await NotificationHelper.cancelAllForTask(task.id,
             reminderMinutes: task.reminderMinutes);
       } catch (e) {
         debugPrint('Failed to cancel reminders for ${task.id}: $e');
       }
-    }
+    }));
   }
 
   Future<void> clearAllTasks() async {
