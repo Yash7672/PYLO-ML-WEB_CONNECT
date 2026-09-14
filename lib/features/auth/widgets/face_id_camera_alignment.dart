@@ -25,6 +25,12 @@ class FaceIdCameraAlignment extends StatelessWidget {
   /// surrounded by a consistent black gap and never touches the border.
   static double previewScale() => 0.8;
 
+  /// Extra visual zoom applied to the camera image INSIDE the inner oval.
+  /// This only magnifies the painted preview (crop-zoom after the cover fit,
+  /// centered, same aspect) — the oval geometry, position and camera feed
+  /// are untouched.
+  static double previewZoom() => 1.15;
+
   @override
   Widget build(BuildContext context) {
     if (!camera.value.isInitialized) {
@@ -77,10 +83,14 @@ class FaceIdCameraAlignment extends StatelessWidget {
                 child: FittedBox(
                   fit: BoxFit.cover,
                   clipBehavior: Clip.hardEdge,
-                  child: SizedBox(
-                    width: camW,
-                    height: camH,
-                    child: CameraPreview(camera),
+                  child: Transform.scale(
+                    scale: previewZoom(),
+                    alignment: Alignment.center,
+                    child: SizedBox(
+                      width: camW,
+                      height: camH,
+                      child: CameraPreview(camera),
+                    ),
                   ),
                 ),
               ),
