@@ -26,6 +26,12 @@ class _AppLockGateState extends ConsumerState<AppLockGate>
   bool _authenticating = false;
   bool _widgetActionHandled = false;
 
+  /// One-shot automatic biometric prompt. Set true the first time the app
+  /// requires auth on a fresh launch so the native fingerprint dialog appears
+  /// with no button tap — while resume-from-background relocks keep the
+  /// existing manual policy (tap the fingerprint button).
+  bool _autoBiometricPrompted = false;
+
   /// Drives the visible lockout countdown while it is active.
   Timer? _lockoutTicker;
   int _lockoutSecondsLeft = 0;
@@ -193,6 +199,22 @@ class _AppLockGateState extends ConsumerState<AppLockGate>
     // NORMAL FOCUS: also show focus screen (can be exited with confirmation).
     if (activeFocus != null) {
       return const FocusActiveScreen();
+    }
+
+    // AUTO-FINGERPRINT ON LAUNCH: the instant the provider's Phase 2 check
+    // confirms an enrolled, enabled biometric is available on a locked fresh
+    // launch, prompt the native OS dialog immediately — no "Fingerprint"
+    // button tap. One-shot per gate session (survives the session), so
+    // background relocks keep the existing manual PIN/fingerprint policy and
+    // there is never an auth loop. The existing `_authenticateWithBiometric`
+    // guard also blocks the PIN lockout window and in-flight auth.
+    if (!_autoBiometricPrompted && security.shouldOfferBiometric) {
+      _autoBiometricPrompted = true;
+      if (!ref.read(securityProvider.notifier).isPinLockedOut) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _authenticateWithBiometric();
+        });
+      }
     }
 
     if (!security.requiresAuth) {
