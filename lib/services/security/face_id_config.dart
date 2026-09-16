@@ -35,8 +35,17 @@ abstract final class FaceIdConfig {
   // -------------------------------------------------------------------------
 
   /// Minimum cosine similarity required to treat a probe embedding as a match.
-  /// Starting point for the real device; tune after on-device testing.
-  static const double similarityThreshold = 0.75;
+  ///
+  /// HARDENED FROM 0.75. [FaceMatchingService.bestMatch] takes the MAX score
+  /// across every enrolled pose, and a max over 6-8 comparisons is far more
+  /// permissive than a single 1:1 comparison — 0.75 with max-over-poses left a
+  /// meaningful false-accept window for a look-alike. 0.85 is a conservative
+  /// 1:1 operating point for eye-aligned 112x112 MobileFaceNet embeddings:
+  /// genuine probes sit well above it, impostors well below.
+  ///
+  /// Requires re-enrollment to take effect (the template is unchanged, but
+  /// every existing probe is now scored against the stricter gate).
+  static const double similarityThreshold = 0.85;
 
   // -------------------------------------------------------------------------
   // Enrollment
@@ -78,7 +87,12 @@ abstract final class FaceIdConfig {
 
   /// Cooldown shown after [maxAuthAttempts] failures. The user can fall back
   /// to fingerprint or PIN while the cooldown runs.
-  static const Duration authCooldown = Duration(seconds: 6);
+  ///
+  /// HARDENED FROM 6 s. A camera-based gate that reopens every 6 seconds allows
+  /// an unattended phone to be probed roughly ten times a minute; 30 s cuts
+  /// that to two while leaving the PIN/fingerprint fallback instant, so a
+  /// legitimate user is never locked out.
+  static const Duration authCooldown = Duration(seconds: 30);
 
   // -------------------------------------------------------------------------
   // Capture quality gates (reject junk before it reaches the model)

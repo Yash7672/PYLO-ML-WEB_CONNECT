@@ -313,7 +313,30 @@ class NotificationHelper {
     final androidImpl = _notifications.resolvePlatformSpecificImplementation<
         AndroidFlutterLocalNotificationsPlugin>();
     await androidImpl?.requestNotificationsPermission();
-    await androidImpl?.requestExactAlarmsPermission();
+  }
+
+  /// Android 12+: opens the system "Alarms & reminders" screen so the user can
+  /// grant SCHEDULE_EXACT_ALARM access.
+  ///
+  /// Deliberately NOT called from [init]: dropping every user straight into a
+  /// system settings screen on first launch (with no context for why) is
+  /// hostile UX and reads badly in Play review. Callers request it at a
+  /// contextual moment instead — when the user turns task reminders on, or
+  /// saves a task that actually carries a reminder or alarm.
+  ///
+  /// Nothing breaks when it is never granted: the native scheduler falls back
+  /// to inexact alarms, so reminders still fire (possibly a little late)
+  /// rather than silently disappearing.
+  static Future<void> requestExactAlarmAccess() async {
+    if (kIsWeb) return;
+    try {
+      await ensureInitialized();
+      final androidImpl = _notifications.resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin>();
+      await androidImpl?.requestExactAlarmsPermission();
+    } catch (e) {
+      debugPrint('Exact alarm access request failed: $e');
+    }
   }
 
   /// Decodes a notification response (warm start: the alarm's full-screen

@@ -507,6 +507,57 @@ class HomeWidgetService {
     );
   }
 
+  // ── Deferred alarm cancels (widget checkbox taps) ──────────────────
+
+  /// Mailbox key for task ids whose alarm/reminders must be withdrawn once
+  /// the MAIN isolate is running.
+  static const String _pendingAlarmCancelKey = 'pylo_pending_alarm_cancels';
+
+  /// Upper bound on the mailbox so a pathological burst of widget taps can
+  /// never grow it without limit.
+  static const int _maxPendingAlarmCancels = 50;
+
+  /// Queues [taskId] so the main isolate withdraws its pending alarm and
+  /// reminders.
+  ///
+  /// Called from the widget background isolate, where the notification and
+  /// AlarmManager plugins are NOT registered — a direct cancel there would
+  /// throw MissingPluginException. HomeWidget's own data store IS available in
+  /// that isolate, so it is used as the transport.
+  static Future<void> queueAlarmCancel(String taskId) async {
+    if (kIsWeb || taskId.isEmpty) return;
+    try {
+      await init();
+      final existing =
+          await HomeWidget.getWidgetData<String>(_pendingAlarmCancelKey) ?? '';
+      final ids = existing.isEmpty ? <String>[] : existing.split(',');
+      if (ids.contains(taskId)) return;
+      ids.add(taskId);
+      final capped = ids.length > _maxPendingAlarmCancels
+          ? ids.sublist(ids.length - _maxPendingAlarmCancels)
+          : ids;
+      await HomeWidget.saveWidgetData<String>(
+          _pendingAlarmCancelKey, capped.join(','));
+    } catch (e) {
+      debugPrint('HomeWidget queueAlarmCancel failed: $e');
+    }
+  }
+
+  /// Reads AND clears the queued task ids. Main isolate only.
+  static Future<List<String>> takePendingAlarmCancels() async {
+    if (kIsWeb) return const [];
+    try {
+      await init();
+      final raw = await HomeWidget.getWidgetData<String>(_pendingAlarmCancelKey);
+      if (raw == null || raw.isEmpty) return const [];
+      await HomeWidget.saveWidgetData<String>(_pendingAlarmCancelKey, '');
+      return raw.split(',').where((id) => id.isNotEmpty).toList();
+    } catch (e) {
+      debugPrint('HomeWidget takePendingAlarmCancels failed: $e');
+      return const [];
+    }
+  }
+
   // ── Task completion from widget ────────────────────────────────────
 
   static Future<String?> getWidgetAction() async {

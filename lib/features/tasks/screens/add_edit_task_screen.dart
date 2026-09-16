@@ -183,6 +183,14 @@ class _AddEditTaskScreenState extends ConsumerState<AddEditTaskScreen> {
         await ref.read(taskProvider.notifier).addTask(task);
       }
 
+      // Ask for exact-alarm access at the moment a reminder/alarm is actually
+      // being armed (never at plugin init), so the system screen is contextual
+      // instead of a surprise on first launch.
+      if ((hasReminders || (_alarmEnabled && _alarmTime != null)) &&
+          !isEditingCompleted) {
+        await NotificationHelper.requestExactAlarmAccess();
+      }
+
       // A task that was already completed (e.g. its title/due date being
       // corrected after completion) must NOT re-arm its reminders.
       if (hasReminders && !isEditingCompleted) {

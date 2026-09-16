@@ -70,13 +70,11 @@ class SettingsController extends StateNotifier<AppThemeMode> {
     state = mode;
     await prefs.setString('theme_mode', mode.name);
   }
-}
-
-final settingsProvider =
+}final settingsProvider =
     StateNotifierProvider<SettingsController, AppThemeMode>((ref) {
   return SettingsController(
-      initialMode: ref              .watch(initialThemeModeProvider) ??
-          AppThemeMode.light);
+      initialMode:
+          ref.watch(initialThemeModeProvider) ?? AppThemeMode.light);
 });
 
 /// Optional override injected at app bootstrap (see main.dart). Stays null

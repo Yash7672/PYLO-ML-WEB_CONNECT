@@ -32,6 +32,15 @@ Future<void> onWidgetTaskAction(Uri? uri) async {
       final toggled = task.copyWith(isCompleted: !task.isCompleted);
       await db.updateTask(toggled);
 
+      // A task completed from the widget must not keep ringing its alarm or
+      // firing its reminders. The notification and AlarmManager plugins are
+      // not registered in this headless isolate, so the cancel is QUEUED and
+      // performed by the main isolate on the next launch/resume (see
+      // main.dart → _drainPendingWidgetAlarmCancels).
+      if (toggled.isCompleted) {
+        await HomeWidgetService.queueAlarmCancel(toggled.id);
+      }
+
       // Mutate the already-fetched list in place so the widget push avoids a
       // second full-table scan right after the write.
       allTasks[taskIndex] = toggled;

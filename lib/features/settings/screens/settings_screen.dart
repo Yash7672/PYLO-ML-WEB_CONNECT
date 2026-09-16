@@ -27,6 +27,7 @@ import '../../../theme/app_theme.dart';
 import '../../categories/screens/manage_categories_screen.dart';
 import '../../auth/screens/face_id_capture_screen.dart';
 import '../../profile/screens/profile_screen.dart';
+import '../widgets/web_access_section.dart';
 
 class SettingsScreen extends ConsumerWidget {
   const SettingsScreen({super.key});
@@ -141,6 +142,10 @@ class SettingsScreen extends ConsumerWidget {
                     }
                     if (!changed) return;
                     if (value) {
+                      // Contextual exact-alarm request: the user just asked for
+                      // reminders, so this is the moment the system prompt makes
+                      // sense (it is never shown at plugin init).
+                      await NotificationHelper.requestExactAlarmAccess();
                       // Tasks added while reminders were off have no scheduled
                       // notifications — schedule them all now.
                       await ref
@@ -369,6 +374,8 @@ class SettingsScreen extends ConsumerWidget {
               ],
             ),
           ),
+
+          const WebAccessSection(),
 
           _sectionHeader(context, 'Data'),
           Card(
