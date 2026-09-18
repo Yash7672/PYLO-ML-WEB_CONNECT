@@ -535,7 +535,8 @@ class SettingsScreen extends ConsumerWidget {
                   'Offline • Local • Private • Fast\nv2.0.0 — your data never leaves your device.'),
               leading: ClipOval(
                 child: Image.asset('assets/logo.png',
-                    width: 40, height: 40, fit: BoxFit.cover),
+                    width: 40, height: 40, fit: BoxFit.cover,
+                    cacheWidth: 120, cacheHeight: 120),
               ),
             ),
           ),

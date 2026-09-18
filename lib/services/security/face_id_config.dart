@@ -85,14 +85,12 @@ abstract final class FaceIdConfig {
   /// After this many consecutive failed unlock attempts the camera locks out.
   static const int maxAuthAttempts = 5;
 
-  /// Cooldown shown after [maxAuthAttempts] failures. The user can fall back
-  /// to fingerprint or PIN while the cooldown runs.
-  ///
-  /// HARDENED FROM 6 s. A camera-based gate that reopens every 6 seconds allows
-  /// an unattended phone to be probed roughly ten times a minute; 30 s cuts
-  /// that to two while leaving the PIN/fingerprint fallback instant, so a
-  /// legitimate user is never locked out.
-  static const Duration authCooldown = Duration(seconds: 30);
+  /// Brief pause after [maxAuthAttempts] failures before the camera resumes
+  /// scanning. The user can fall back to fingerprint or PIN while it runs.
+  /// Kept short (~2 s) so retry after a bad scan feels immediate; the
+  /// PIN/fingerprint fallback remains instant, so a legitimate user is never
+  /// locked out.
+  static const Duration authCooldown = Duration(seconds: 2);
 
   // -------------------------------------------------------------------------
   // Capture quality gates (reject junk before it reaches the model)

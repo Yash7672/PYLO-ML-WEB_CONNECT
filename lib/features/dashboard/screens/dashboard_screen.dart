@@ -34,6 +34,8 @@ class DashboardScreen extends ConsumerWidget {
                 width: 30,
                 height: 30,
                 fit: BoxFit.cover,
+                cacheWidth: 90,
+                cacheHeight: 90,
               ),
             ),
             const SizedBox(width: 12),
@@ -326,7 +328,7 @@ class _BirthdaysSection extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final birthdays =
-        ref.watch(birthdayProvider).maybeWhen(data: (b) => b, orElse: () => []);
+        ref.watch(birthdayProvider.select((s) => s.value ?? const <Birthday>[]));
 
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);

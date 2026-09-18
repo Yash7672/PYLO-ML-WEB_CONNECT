@@ -22,17 +22,30 @@ class _AppNavigationState extends ConsumerState<AppNavigation> {
   int _currentIndex = 0;
   bool _hasActiveFocus = false;
 
-  /// IndexedStack keeps all visited screens alive so switching tabs doesn't
-  /// rebuild screens from scratch — preserving scroll position, loaded data,
-  /// and avoiding duplicate provider watches.
-  late final List<Widget> _screens = [
-    const DashboardScreen(),
-    const TaskListScreen(),
-    const CalendarScreen(),
-    const StreaksScreen(),
-    const ChecklistScreen(),
-    const MoreScreen(),
-  ];
+  /// IndexedStack keeps already-visited screens alive so switching tabs does
+  /// not rebuild them from scratch — preserving scroll position, loaded data,
+  /// and avoiding duplicate provider watches. Screens are built LAZILY: a
+  /// tab's sometimes-heavy tree (e.g. the calendar's month grid) is only
+  /// mounted the first time it is visited, so the dashboard is the only tab
+  /// paid for at unlock.
+  final Set<int> _visitedTabs = {0};
+
+  static Widget _screenFor(int index) => switch (index) {
+        0 => const DashboardScreen(),
+        1 => const TaskListScreen(),
+        2 => const CalendarScreen(),
+        3 => const StreaksScreen(),
+        4 => const ChecklistScreen(),
+        5 => const MoreScreen(),
+        _ => const SizedBox.shrink(),
+      };
+
+  void _onDestinationSelected(int index) {
+    setState(() {
+      _currentIndex = index;
+      _visitedTabs.add(index);
+    });
+  }
 
   @override
   void initState() {
@@ -63,7 +76,12 @@ class _AppNavigationState extends ConsumerState<AppNavigation> {
     return Scaffold(
       body: IndexedStack(
         index: _currentIndex,
-        children: _screens,
+        children: [
+          for (var i = 0; i < 6; i++)
+            _visitedTabs.contains(i)
+                ? _screenFor(i)
+                : const SizedBox.shrink(),
+        ],
       ),
       bottomNavigationBar: isGlass
           ? Padding(
@@ -77,8 +95,7 @@ class _AppNavigationState extends ConsumerState<AppNavigation> {
                 blur: 14,
                 child: NavigationBar(
                   selectedIndex: _currentIndex,
-                  onDestinationSelected: (index) =>
-                      setState(() => _currentIndex = index),
+                  onDestinationSelected: _onDestinationSelected,
                   destinations: const [
                     NavigationDestination(
                         icon: Icon(Icons.dashboard_outlined),
@@ -110,8 +127,7 @@ class _AppNavigationState extends ConsumerState<AppNavigation> {
             )
           : NavigationBar(
               selectedIndex: _currentIndex,
-              onDestinationSelected: (index) =>
-                  setState(() => _currentIndex = index),
+              onDestinationSelected: _onDestinationSelected,
               destinations: const [
                 NavigationDestination(
                     icon: Icon(Icons.dashboard_outlined),
