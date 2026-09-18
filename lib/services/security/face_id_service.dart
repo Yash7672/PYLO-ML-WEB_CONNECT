@@ -378,7 +378,7 @@ class FaceIdService {
       if (!result.success || result.embedding == null) {
         return null;
       }
-      return matchAgainstStoredTemplate(result.embedding!);
+      return await matchAgainstStoredTemplate(result.embedding!);
     } catch (e) {
       debugPrint('Capture-and-score failed: $e');
       return null;

@@ -8,9 +8,9 @@ import 'package:uuid/uuid.dart';
 import '../../database/database_helper.dart';
 import '../../models/checklist_model.dart';
 import '../../models/task_model.dart';
+import 'cloud_config_store.dart';
 import 'net_probe_io.dart'
     if (dart.library.js) 'net_probe_web.dart' as net_probe;
-import 'supabase_config.dart';
 import 'today_data_serializer.dart';
 
 /// Coarse outcome codes the Settings UI maps to friendly user messages,
@@ -59,9 +59,18 @@ class CloudSyncResult {
 ///  - Uploads PULL FIRST (merge remote completions, then push) so a stale local
 ///    snapshot can never erase a remote change this device has not seen yet.
 class CloudSyncService {
-  CloudSyncService(this._dbHelper);
+  CloudSyncService(this._dbHelper, this._configStore);
 
   final DatabaseHelper _dbHelper;
+  final CloudConfigStore _configStore;
+
+  /// The user's project-backed Supabase client. Built lazily from the stored
+  /// [CloudConfig] (see [_buildClient]); null until the user connects a project.
+  SupabaseClient? _clientObject;
+
+  /// Session persistence for the CURRENT project's client. Scoped by the
+  /// project ref so two different projects never read each other's sessions.
+  LocalStorage? _clientSessionStorage;
 
   Completer<void>? _initCompleter;
   bool _initialized = false;
@@ -123,30 +132,32 @@ class CloudSyncService {
   /// enough to tell "host unreachable" apart from a momentarily slow link.
   static const Duration _probeTimeout = Duration(seconds: 6);
 
-  bool get isConfigured => SupabaseConfig.isConfigured;
+  bool get isConfigured => _configStore.current?.isConfigured ?? false;
   bool get isInitialized => _initialized;
 
   bool get isSignedIn {
     if (!_initialized) return false;
-    return _client.auth.currentUser != null;
+    final client = _clientObject;
+    return client != null && client.auth.currentUser != null;
   }
 
   String? get currentUserId {
     if (!_initialized) return null;
-    return _client.auth.currentUser?.id;
+    return _clientObject?.auth.currentUser?.id;
   }
 
   String? get currentEmail {
     if (!_initialized) return null;
-    return _client.auth.currentUser?.email;
+    return _clientObject?.auth.currentUser?.email;
   }
 
-  GoTrueClient get _auth => _client.auth;
-  SupabaseClient get _client => Supabase.instance.client;
+  GoTrueClient get _auth => _clientObject!.auth;
+  SupabaseClient get _client => _clientObject!;
 
-  /// Lazily initializes the single Supabase client. Idempotent, happens after
-  /// the first frame, and can never throw: a missing publishable key or any
-  /// platform init error simply leaves the app in full offline mode.
+  /// Lazily builds the client for the stored project. Idempotent, happens after
+  /// the first frame, and can never throw: no stored project, an unreadable
+  /// value or any platform init error simply leaves the app in full offline
+  /// mode.
   Future<void> ensureInitialized() async {
     if (_initialized || _initFailed) return;
     final inFlight = _initCompleter;
@@ -154,39 +165,115 @@ class CloudSyncService {
       await inFlight.future;
       return;
     }
-    if (!SupabaseConfig.isConfigured) {
+    final config = await _configStore.load();
+    if (config == null || !config.isConfigured) {
       _initFailed = true;
       if (kDebugMode) {
-        debugPrint('PYLO cloud config: ${SupabaseConfig.debugDescription()}');
+        debugPrint('PYLO cloud config: ${config?.debugDescription() ?? 'not connected'}');
       }
       return;
     }
-    if (kDebugMode) {
-      debugPrint('PYLO cloud config: ${SupabaseConfig.debugDescription()}');
-    }
+    if (kDebugMode) debugPrint('PYLO cloud config: ${config.debugDescription()}');
     final completer = Completer<void>();
     _initCompleter = completer;
     try {
-      await Supabase.initialize(
-        url: SupabaseConfig.url,
-        publishableKey: SupabaseConfig.anonKey,
-      );
+      await _buildClient(config);
       _initialized = true;
-      _authSub?.cancel();
-      _authSub = _auth.onAuthStateChange.listen(
-        _onAuthStateChanged,
-        onError: (Object e, StackTrace st) {
-          if (kDebugMode) debugPrint('Cloud auth stream error: $e\n$st');
-        },
-      );
-      authUser.value = _auth.currentUser;
       completer.complete();
     } catch (e, st) {
       _initFailed = true;
-      if (kDebugMode) debugPrint('Supabase init failed: $e\n$st');
+      if (kDebugMode) debugPrint('Cloud init failed: $e\n$st');
       completer.complete();
     } finally {
       _initCompleter = null;
+    }
+  }
+
+  /// Builds (or rebuilds) the standalone client for [config].
+  ///
+  /// `Supabase.initialize()` is deliberately NOT used: it is one-shot (a second
+  /// call is silently skipped), which would make switching projects impossible.
+  /// Instead a fresh [SupabaseClient] is constructed per config. Session
+  /// persistence is replicated manually (the `SupabaseAuth` singleton that
+  /// normally does it only exists for `Supabase.initialize`): the same JSON
+  /// format is stored under the same per-project key scheme, and restored with
+  /// `recoverSession` on every build.
+  Future<void> _buildClient(CloudConfig config) async {
+    await _disposeClient();
+    final storage = SharedPreferencesLocalStorage(
+      persistSessionKey: 'sb-${config.projectRef ?? 'pylo'}-auth-token',
+    );
+    try {
+      await storage.initialize();
+    } catch (_) {}
+
+    final client = SupabaseClient(
+      config.url,
+      config.anonKey,
+      authOptions: const FlutterAuthClientOptions(),
+    );
+    _clientObject = client;
+    _clientSessionStorage = storage;
+
+    _authSub?.cancel();
+    _authSub = client.auth.onAuthStateChange.listen(
+      _onAuthStateChanged,
+      onError: (Object e, StackTrace st) {
+        if (kDebugMode) debugPrint('Cloud auth stream error: $e\n$st');
+      },
+    );
+
+    // Restore any persisted session for THIS project (local read, no network).
+    try {
+      final persisted = await storage.accessToken();
+      if (persisted != null && persisted.isNotEmpty) {
+        await client.auth.recoverSession(persisted);
+      }
+    } catch (e) {
+      if (kDebugMode) debugPrint('Cloud session restore skipped: $e');
+    }
+    authUser.value = client.auth.currentUser;
+  }
+
+  /// Tears down the current project's client and every resource tied to it:
+  /// auth subscription, realtime channel, timers, cached sync state and the
+  /// persisted-session handle. SQLite data is never touched.
+  Future<void> _disposeClient() async {
+    _authSub?.cancel();
+    _authSub = null;
+    _unsubscribeRealtime();
+    _stopCloudRefreshTimer();
+    _lastAppliedDateKey = null;
+    _lastAppliedSignature = null;
+    _cloudCompletions = null;
+    _syncedDateKey = null;
+    _syncedPayloadHash = null;
+    authUser.value = null;
+    final client = _clientObject;
+    _clientObject = null;
+    _clientSessionStorage = null;
+    _initialized = false;
+    if (client == null) return;
+    try {
+      await client.dispose();
+    } catch (_) {}
+  }
+
+  /// Mirrors what `SupabaseAuth` does for the singleton: writes the session JSON
+  /// on login/token refresh, removes it on explicit logout. Keeps the current
+  /// project's session restorable across app restarts.
+  Future<void> _persistSession(AuthState state) async {
+    final storage = _clientSessionStorage;
+    if (storage == null) return;
+    final session = state.session;
+    try {
+      if (session != null) {
+        await storage.persistSession(jsonEncode(session.toJson()));
+      } else if (state.event == AuthChangeEvent.signedOut) {
+        await storage.removePersistedSession();
+      }
+    } catch (e) {
+      if (kDebugMode) debugPrint('Cloud session persist failed: $e');
     }
   }
 
@@ -196,7 +283,7 @@ class CloudSyncService {
   /// realtime channel and pulls any completion changes made from the website.
   Future<void> restoreSession() async {
     await ensureInitialized();
-    authUser.value = _initialized ? _auth.currentUser : null;
+    authUser.value = _initialized ? _clientObject?.auth.currentUser : null;
     if (_initialized && isSignedIn) {
       final userId = currentUserId;
       if (userId != null) _subscribeRealtime(userId);
@@ -211,6 +298,7 @@ class CloudSyncService {
   /// queues an immediate upload + pull; a lost session tears down the
   /// realtime listener and the background refresh timer.
   void _onAuthStateChanged(AuthState state) {
+    unawaited(_persistSession(state));
     // `AuthState.session` is a public field of another library, so it cannot be
     // type-promoted by a null check — hold it in a local instead.
     final session = state.session;
@@ -230,16 +318,204 @@ class CloudSyncService {
   }
 
   Future<bool> _prepare() async {
-    if (!SupabaseConfig.isConfigured) return false;
+    final config = await _configStore.load();
+    if (config == null || !config.isConfigured) return false;
     await ensureInitialized();
     return _initialized;
   }
 
   CloudSyncResult _notConfigured() => const CloudSyncResult.fail(
         CloudSyncErrorKind.notConfigured,
-        'Cloud sync is not configured. Rebuild the app with the Supabase '
-        'publishable key (--dart-define=SUPABASE_ANON_KEY=...).',
+        'No Supabase project is connected. Use "Create an account" and enter '
+        'your own Project URL and anon/public key to enable cloud backup.',
       );
+
+  // ── Bring your own cloud (Create Account screen) ──────────────────────
+
+  /// Applies the user's chosen project and (re)builds the client immediately.
+  /// A changed URL/key rebinds the active client; an unchanged config is a
+  /// no-op. Local SQLite data is never touched. Called right before signing up
+  /// so the account is created on the user's OWN project.
+  Future<void> setConfig(CloudConfig config) async {
+    final previous = await _configStore.load();
+    await _configStore.save(config);
+    if (previous != null && previous.sameAs(config) && _clientObject != null) {
+      return;
+    }
+    _initialized = false;
+    _initFailed = false;
+    await _disposeClient();
+    await ensureInitialized();
+    if (_initialized && isSignedIn) {
+      scheduleSync();
+      schedulePull();
+    }
+  }
+
+  /// Turns cloud sync OFF: drops the stored project and disposes the client
+  /// and any session. Local SQLite data is never touched and the app returns
+  /// to full offline mode (all sync paths silently no-op again).
+  Future<void> clearConfig() async {
+    await _configStore.clear();
+    _initialized = false;
+    _initFailed = false;
+    await _disposeClient();
+  }
+
+  /// Verifies a candidate Supabase project (URL + anon key) WITHOUT saving it
+  /// or touching the active client. A throwaway client first proves the project
+  /// answers: a healthy project rejects a clearly-bogus login with "invalid
+  /// login credentials", which confirms the URL and anon key are correct and
+  /// reachable (no email sent, no session created). It then checks that the
+  /// `daily_data` and `profiles` tables exist with the columns the app uses.
+  Future<CloudSyncResult> testConnection(String url, String anonKey) async {
+    final trimmedUrl = url.trim();
+    final trimmedKey = anonKey.trim();
+    if (trimmedUrl.isEmpty || trimmedKey.isEmpty) {
+      return const CloudSyncResult.fail(
+        CloudSyncErrorKind.invalidCredentials,
+        'Enter both the Project URL and the anon/public key first.',
+      );
+    }
+    final candidate = CloudConfig(url: trimmedUrl, anonKey: trimmedKey);
+    if (!candidate.isConfigured) {
+      return const CloudSyncResult.fail(
+        CloudSyncErrorKind.invalidCredentials,
+        'That does not look like a Supabase project URL. It should look like '
+        'https://<project-ref>.supabase.co',
+      );
+    }
+    SupabaseClient? probe;
+    try {
+      probe = SupabaseClient(
+        trimmedUrl,
+        trimmedKey,
+        authOptions: const FlutterAuthClientOptions(),
+      );
+
+      // 1) Prove the project + anon key answer.
+      try {
+        await probe.auth
+            .signInWithPassword(
+              email: 'pylo-connection-check@invalid.local',
+              password: 'pylo-connection-check-invalid-password',
+            )
+            .timeout(_timeout);
+        // A real project never signs in this bogus account; reaching here only
+        // happens against an unusual endpoint.
+        return const CloudSyncResult.fail(
+          CloudSyncErrorKind.server,
+          'The project answered in an unexpected way. Double-check that this is '
+          'a Supabase project URL and its anon/public key.',
+        );
+      } on AuthException catch (e) {
+        final text = e.message.toLowerCase();
+        final code = (e.code ?? '').toLowerCase();
+        if (code.contains('invalid_credentials') ||
+            text.contains('invalid login credentials') ||
+            text.contains('invalid credentials')) {
+          // A healthy project rejects the bogus login with "invalid login
+          // credentials" (no email sent, no session created). The URL + key
+          // are proven reachable; fall through to the table-shape check.
+        } else {
+          final mapped = _mapServerAuthError(e);
+          if (mapped != null) {
+            // Invalid key / wrong project / disabled auth — the message says
+            // which field to fix.
+            return mapped;
+          }
+          return CloudSyncResult.fail(
+            CloudSyncErrorKind.server,
+            'The project answered with HTTP ${e.statusCode ?? '?'}'
+            '${e.message.isNotEmpty ? ' (${e.message})' : ''}.',
+          );
+        }
+      }
+
+      // 2) Verify the tables exist with the expected column shape.
+      final tableIssue = await _checkTableShape(probe);
+      if (tableIssue != null) return tableIssue;
+
+      return const CloudSyncResult.ok(
+        'Connected! This project is ready for PYLO cloud sync.',
+      );
+    } catch (e) {
+      if (kDebugMode) debugPrint('Cloud test connection failed: $e');
+      return const CloudSyncResult.fail(
+        CloudSyncErrorKind.network,
+        'Could not reach that project. Check the Project URL and your internet '
+        'connection, then try again.',
+      );
+    } finally {
+      if (probe != null) {
+        try {
+          await probe.dispose();
+        } catch (_) {}
+      }
+    }
+  }
+
+  /// Selects with the exact columns the app reads/writes. A missing table or a
+  /// wrong column shape makes PostgREST fail instead of returning rows, which
+  /// is how "did you run the SQL script?" is detected. RLS never interferes:
+  /// an empty (RLS-filtered) result is still a 200.
+  Future<CloudSyncResult?> _checkTableShape(SupabaseClient client) async {
+    try {
+      await client
+          .from('daily_data')
+          .select('id,user_id,data_date,tasks,lists,sublists,updated_at')
+          .limit(0)
+          .timeout(_timeout);
+    } on PostgrestException catch (e) {
+      return _tablesNotReady(e, step: 'Step 6 (daily_data)');
+    } catch (_) {
+      return null; // only a decoded PostgREST error proves a shape problem.
+    }
+    try {
+      await client
+          .from('profiles')
+          .select('id,email,full_name,avatar_url')
+          .limit(0)
+          .timeout(_timeout);
+    } on PostgrestException catch (e) {
+      return _tablesNotReady(e, step: 'Step 5 (profiles)');
+    } catch (_) {
+      return null;
+    }
+    return null;
+  }
+
+  CloudSyncResult _tablesNotReady(
+    PostgrestException e, {
+    required String step,
+  }) {
+    final code = (e.code ?? '').toLowerCase();
+    final message = e.message.toLowerCase();
+    final missingTable = code.contains('205') ||
+        code.contains('106') ||
+        message.contains('could not find the table') ||
+        (message.contains('relation') && message.contains('does not exist'));
+    if (missingTable) {
+      return CloudSyncResult.fail(
+        CloudSyncErrorKind.server,
+        'Tables not found - did you run the SQL script? $step may be missing. '
+        'Open "Help me connect" and run all three steps, then Test again.',
+      );
+    }
+    final wrongShape = code.contains('204') || message.contains('column');
+    if (wrongShape) {
+      return const CloudSyncResult.fail(
+        CloudSyncErrorKind.server,
+        'This project has tables with the right names but a different shape. '
+        'Re-run the latest SQL script from "Help me connect".',
+      );
+    }
+    return CloudSyncResult.fail(
+      CloudSyncErrorKind.server,
+      'This project is reachable but the tables could not be verified '
+      '(${e.message}). Run the SQL script from "Help me connect".',
+    );
+  }
 
   // ── Authentication ────────────────────────────────────────────────────
 
@@ -1303,8 +1579,9 @@ class CloudSyncService {
   ///  3. Wrong project key / bad project URL get an explicit config message.
   ///  4. Every failure logs the resolved config + raw error for diagnosis.
   Future<CloudSyncResult> _classify(Object e) async {
+    final config = _configStore.current;
     if (kDebugMode) {
-      debugPrint('Cloud sync error | config: ${SupabaseConfig.debugDescription()}');
+      debugPrint('Cloud sync error | config: ${config?.debugDescription() ?? 'not connected'}');
       debugPrint('Cloud sync error | error: ${e.runtimeType}: $e');
     }
 
@@ -1338,11 +1615,12 @@ class CloudSyncService {
       );
     }
 
-    final baseUri = SupabaseConfig.baseUri;
+    final baseUri = config?.baseUri;
     if (baseUri == null) {
       return const CloudSyncResult.fail(
         CloudSyncErrorKind.notConfigured,
-        'The configured Supabase URL is invalid. Check SUPABASE_URL.',
+        'No valid Supabase project URL is configured. Add one from the '
+        'Settings → Web Access screen.',
       );
     }
 
@@ -1386,12 +1664,11 @@ class CloudSyncService {
       return 'The cloud server may be temporarily unavailable.';
     }
     if (status == '401' || status == '403') {
-      return 'Check the email/password and that the publishable key '
-          '(SUPABASE_ANON_KEY) matches this project.';
+      return 'Check the email/password and that the anon/public key matches '
+          'this project.';
     }
     if (status == '404') {
-      return 'Check that the project URL (SUPABASE_URL) is correct for this '
-          'project.';
+      return 'Check that the Project URL is correct for this project.';
     }
     return 'Please try again.';
   }
@@ -1405,9 +1682,9 @@ class CloudSyncService {
     if (code.contains('invalid_api_key') ||
         message.contains('invalid api key')) {
       return const CloudSyncResult.fail(
-        CloudSyncErrorKind.notConfigured,
-        'Cloud sync is using an invalid project key. Rebuild the app with the '
-        'correct --dart-define=SUPABASE_ANON_KEY=<publishable key>.',
+        CloudSyncErrorKind.invalidCredentials,
+        'This project rejected the anon/public key. Open Settings → API and '
+        'copy the "anon" / "public" key for this project.',
       );
     }
     if ((message.contains('project') ||
@@ -1416,9 +1693,9 @@ class CloudSyncService {
             message.contains('could not be found') ||
             message.contains('does not exist'))) {
       return const CloudSyncResult.fail(
-        CloudSyncErrorKind.notConfigured,
-        'The configured Supabase URL does not match any project. '
-        'Check SUPABASE_URL.',
+        CloudSyncErrorKind.invalidCredentials,
+        'No Supabase project found at that URL. Check the Project URL for this '
+        'project (Settings → API).',
       );
     }
     if (code.contains('invalid_credentials') ||
@@ -1489,12 +1766,13 @@ class CloudSyncService {
     return needles.any(text.contains);
   }
 
-  void dispose() {
+  Future<void> dispose() async {
     _syncDebounce?.cancel();
     _authSub?.cancel();
     _pullDebounce?.cancel();
-    _cloudRefreshTimer?.cancel();
+    _stopCloudRefreshTimer();
     _unsubscribeRealtime();
+    await _disposeClient();
     remoteDataApplied.dispose();
   }
 }

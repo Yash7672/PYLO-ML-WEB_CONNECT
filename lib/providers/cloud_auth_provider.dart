@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../services/cloud/cloud_config_store.dart';
 import '../services/cloud/cloud_sync_service.dart';
 import 'database_provider.dart';
 
@@ -28,10 +29,20 @@ class CloudAuthState {
   }
 }
 
+/// The user's chosen Supabase project (Settings → Web Access). Empty until the
+/// user connects one on the Create Account screen. Loaded lazily via secure
+/// storage, so a fresh install costs nothing at startup.
+final cloudConfigStoreProvider = Provider<CloudConfigStore>((ref) {
+  final store = CloudConfigStore();
+  unawaited(store.load());
+  return store;
+});
+
 /// Single app-wide [CloudSyncService] instance.
 final cloudSyncServiceProvider = Provider<CloudSyncService>((ref) {
   final dbHelper = ref.watch(databaseProvider);
-  final service = CloudSyncService(dbHelper);
+  final store = ref.watch(cloudConfigStoreProvider);
+  final service = CloudSyncService(dbHelper, store);
   ref.onDispose(service.dispose);
   return service;
 });
@@ -77,22 +88,40 @@ class CloudAuthNotifier extends StateNotifier<AsyncValue<CloudAuthState>> {
   Future<CloudSyncResult> createAccount(
     String email,
     String password,
-    String confirmPassword,
-  ) async {
+    String confirmPassword, {
+    CloudConfig? cloud,
+  }) async {
     if (password != confirmPassword) {
       return const CloudSyncResult.fail(
         CloudSyncErrorKind.unknown,
         'Passwords do not match.',
       );
     }
+    // Offline-only account: the cloud fields were left blank, so nothing is
+    // connected. Account creation succeeds locally WITHOUT any network call and
+    // the app keeps running fully offline — no prompts anywhere else.
+    if (cloud == null || !cloud.isConfigured) {
+      return const CloudSyncResult.ok(
+        'Account created in offline mode — all data stays on this device. '
+        'You can connect your own Supabase project later from this screen.',
+      );
+    }
     _setBusy(true);
     try {
+      await service.setConfig(cloud);
       final result = await service.signUp(email, password);
       if (result.ok && service.isSignedIn) service.scheduleSync();
       return result;
     } finally {
       _setBusy(false);
     }
+  }
+
+  /// Validates the entered Project URL + anon/public key against the user's own
+  /// Supabase project without saving anything. Used by the Create Account
+  /// sheet's "Test" button.
+  Future<CloudSyncResult> testConnection(String url, String anonKey) {
+    return service.testConnection(url, anonKey);
   }
 
   Future<CloudSyncResult> login(String email, String password) async {
