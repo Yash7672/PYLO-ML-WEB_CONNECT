@@ -18,6 +18,18 @@ class ChecklistsState {
   });
 }
 
+/// Snapshot of a checklist and its items captured just before a hard delete,
+/// so an Undo action can re-insert them with the exact same row IDs.
+class ChecklistDeleteSnapshot {
+  final Map<String, dynamic> checklistRow;
+  final List<Map<String, dynamic>> items;
+
+  const ChecklistDeleteSnapshot({
+    required this.checklistRow,
+    required this.items,
+  });
+}
+
 final checklistProvider =
     StateNotifierProvider<ChecklistNotifier, ChecklistsState>((ref) {
   final dbHelper = ref.watch(databaseProvider);
@@ -107,17 +119,100 @@ class ChecklistNotifier extends StateNotifier<ChecklistsState> {
     });
   }
 
-  Future<void> deleteChecklist(String id) async {
-    await _runExclusive(() async {
+  /// Deletes a checklist but first snapshots the checklist and its items from
+  /// the database so an Undo can restore them with original row IDs.
+  Future<ChecklistDeleteSnapshot?> deleteChecklistForUndo(
+      Checklist checklist) {
+    return _runExclusive(() async {
       try {
-        await dbHelper.deleteChecklist(id);
-        final items = {...state.items}..remove(id);
-        state = ChecklistsState(
-          checklists: state.checklists.where((c) => c.id != id).toList(),
-          items: items,
+        final rows = await dbHelper.queryRows(
+          'checklists',
+          where: 'id = ?',
+          whereArgs: [checklist.id],
         );
+        if (rows.isEmpty) return null;
+        final items = await dbHelper.queryRows(
+          'checklist_items',
+          where: 'checklistId = ?',
+          whereArgs: [checklist.id],
+          orderBy: 'position ASC',
+        );
+        await dbHelper.deleteChecklist(checklist.id);
+        final stateItems = {...state.items}..remove(checklist.id);
+        state = ChecklistsState(
+          checklists:
+              state.checklists.where((c) => c.id != checklist.id).toList(),
+          items: stateItems,
+        );
+        _updateChecklistWidget();
+        return ChecklistDeleteSnapshot(checklistRow: rows.first, items: items);
       } catch (e) {
         debugPrint('Error deleting checklist: $e');
+        return null;
+      }
+    });
+  }
+
+  /// Re-inserts a deleted checklist and its items (original IDs preserved).
+  Future<void> restoreChecklist(ChecklistDeleteSnapshot snapshot) async {
+    await _runExclusive(() async {
+      try {
+        await dbHelper.restoreRows('checklists', [snapshot.checklistRow]);
+        await dbHelper.restoreRows('checklist_items', snapshot.items);
+        final checklists = await dbHelper.getAllChecklists();
+        final items = await dbHelper.getAllChecklistItems();
+        state = ChecklistsState(checklists: checklists, items: items);
+        _updateChecklistWidget();
+      } catch (e) {
+        debugPrint('Error restoring checklist: $e');
+      }
+    });
+  }
+
+  /// Deletes a checklist item but first snapshots its row so an Undo can
+  /// restore it. Optimistically removes the row on the current frame (so a
+  /// swiped Dismissible leaves the tree immediately), then snapshots and
+  /// hard-deletes inside the mutation queue.
+  Future<Map<String, dynamic>?> deleteItemForUndo(ChecklistItem item) {
+    // Optimistic update first so the swiped row leaves the tree on the same
+    // frame (avoids 'dismissed Dismissible still part of the tree').
+    final items = {...state.items};
+    final list = [...(items[item.checklistId] ?? const <ChecklistItem>[])];
+    list.removeWhere((i) => i.id == item.id);
+    items[item.checklistId] = list;
+    state = ChecklistsState(checklists: state.checklists, items: items);
+    _updateChecklistWidget();
+    return _runExclusive(() async {
+      try {
+        final rows = await dbHelper.queryRows(
+          'checklist_items',
+          where: 'id = ?',
+          whereArgs: [item.id],
+        );
+        await dbHelper.deleteChecklistItem(item.id, item.checklistId);
+        return rows.isEmpty ? null : rows.first;
+      } catch (e) {
+        debugPrint('Error deleting checklist item: $e');
+        await loadChecklists();
+        return null;
+      }
+    });
+  }
+
+  /// Re-inserts a checklist item from a snapshot row and reloads that
+  /// checklist's items to restore canonical order.
+  Future<void> restoreItem(Map<String, dynamic> row) async {
+    await _runExclusive(() async {
+      try {
+        final item = ChecklistItem.fromMap(row);
+        await dbHelper.restoreChecklistItem(item);
+        final fresh = await dbHelper.getChecklistItems(item.checklistId);
+        final items = {...state.items};
+        items[item.checklistId] = fresh;
+        state = ChecklistsState(checklists: state.checklists, items: items);
+        _updateChecklistWidget();
+      } catch (e) {
+        debugPrint('Error restoring checklist item: $e');
       }
     });
   }
@@ -175,25 +270,6 @@ class ChecklistNotifier extends StateNotifier<ChecklistsState> {
         _updateChecklistWidget();
       } catch (e) {
         debugPrint('Error updating checklist item: $e');
-      }
-    });
-  }
-
-  Future<void> deleteItem(ChecklistItem item) async {
-    // Optimistic update first so the swiped row leaves the tree on the same
-    // frame (avoids 'dismissed Dismissible still part of the tree').
-    final items = {...state.items};
-    final list = [...(items[item.checklistId] ?? const <ChecklistItem>[])];
-    list.removeWhere((i) => i.id == item.id);
-    items[item.checklistId] = list;
-    state = ChecklistsState(checklists: state.checklists, items: items);
-    _updateChecklistWidget();
-    await _runExclusive(() async {
-      try {
-        await dbHelper.deleteChecklistItem(item.id, item.checklistId);
-      } catch (e) {
-        debugPrint('Error deleting checklist item: $e');
-        await loadChecklists();
       }
     });
   }

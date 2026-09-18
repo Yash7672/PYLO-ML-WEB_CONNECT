@@ -2,18 +2,7 @@ import 'package:intl/intl.dart';
 
 final DateFormat _displayFormat = DateFormat('MMM dd, yyyy');
 
-extension StringExtension on String {
-  String capitalize() {
-    if (isEmpty) return this;
-    return "${this[0].toUpperCase()}${substring(1).toLowerCase()}";
-  }
-}
-
 extension DateExtension on DateTime {
-  String toFormattedString() {
-    return DateFormat('yyyy-MM-dd').format(this);
-  }
-
   String toDisplayString() {
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);

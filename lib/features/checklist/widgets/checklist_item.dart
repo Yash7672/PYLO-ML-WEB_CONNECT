@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/utils/undo_manager.dart';
 import '../../../core/widgets/dialog_disposer.dart';
 import '../../../core/widgets/glass_components.dart';
 import '../../../models/checklist_model.dart';
@@ -25,7 +26,18 @@ class ChecklistItemTile extends ConsumerWidget {
         child: const Icon(Icons.delete, color: Colors.white),
       ),
       onDismissed: (_) {
-        ref.read(checklistProvider.notifier).deleteItem(item);
+        final messenger = ScaffoldMessenger.of(context);
+        // Capture the notifier NOW — swipe-delete unmounts this tile before
+        // Undo is tapped, and reading `ref` from the unmounted consumer throws
+        // `StateError: Cannot use "ref" after the widget was disposed` from
+        // inside the SnackBar's onTap.
+        final checklistNotifier = ref.read(checklistProvider.notifier);
+        deleteWithUndo<Map<String, dynamic>>(
+          messenger,
+          message: 'Item deleted',
+          performDelete: () => checklistNotifier.deleteItemForUndo(item),
+          undo: (kept) => checklistNotifier.restoreItem(kept),
+        );
       },
       child: CheckboxListTile(
         value: item.completed,

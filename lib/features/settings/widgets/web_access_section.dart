@@ -288,6 +288,7 @@ class WebAccessSection extends ConsumerWidget {
     );
     if (confirmed != true || !context.mounted) return;
     final result = await ref.read(cloudAuthProvider.notifier).logout();
+    if (!context.mounted) return;
     _showResult(context, result);
   }
 
@@ -416,7 +417,7 @@ class WebAccessSection extends ConsumerWidget {
     case CloudSyncErrorKind.network:
       return ('No internet / cloud server unreachable', Colors.red);
     case CloudSyncErrorKind.notConfigured:
-      return ('Cloud sync not configured', Color(0xFFB26A00));
+      return const ('Cloud sync not configured', Color(0xFFB26A00));
     case CloudSyncErrorKind.server:
       return ('Cloud server error', Colors.deepOrange);
     case CloudSyncErrorKind.invalidCredentials:
@@ -539,7 +540,7 @@ class _AuthFormSheetState extends State<_AuthFormSheet> {
               if (_error != null) ...[
                 Text(
                   '${_resultPresentation(CloudSyncResult.fail(_errorKind)).$1}:\n$_error',
-                  style: TextStyle(
+                  style: const TextStyle(
                       color: Colors.redAccent,
                       fontSize: 13,
                       fontWeight: FontWeight.w500)),
@@ -548,11 +549,14 @@ class _AuthFormSheetState extends State<_AuthFormSheet> {
               GlassButton(
                 onPressed: _busy ? null : _submit,
                 child: _busy
-                    ? const SizedBox(
+                    ? SizedBox(
                         width: 20,
                         height: 20,
                         child: CircularProgressIndicator(
-                            strokeWidth: 2, color: Colors.white))
+                            strokeWidth: 2,
+                            color: isGlassTheme(context)
+                                ? GlassColors.onAccent
+                                : Theme.of(context).colorScheme.onPrimary))
                     : Text(widget.submitLabel),
               ),
               const SizedBox(height: 8),

@@ -59,10 +59,16 @@ class FaceEmbeddingService {
     return null;
   }
 
+  /// Warms up the interpreter by introspecting the model contract. Public so
+  /// screens can pre-warm without depending on the private contract type.
+  static Future<void> loadContract() async {
+    await _loadContract();
+  }
+
   /// Reads the model's real input/output tensor metadata. Logs only
   /// non-sensitive technical detail (shape + dtype) — never pixel data or
   /// embeddings.
-  static Future<_ModelContract?> loadContract() async {
+  static Future<_ModelContract?> _loadContract() async {
     if (_contract != null) return _contract;
     final interpreter = await _loadInterpreter();
     if (interpreter == null) return null;
@@ -115,8 +121,8 @@ class FaceEmbeddingService {
       );
 
       debugPrint('[FaceEmbeddingService] model contract: '
-          'in=${effectiveInputShape} (${input.type.name}), '
-          'out=${output.shape} (${output.type.name}), '
+          'in=$effectiveInputShape (${input.type.name}), '
+          'out=$output.shape (${output.type.name}), '
           'reshaped=$reshaped resolved=$resolved');
       return _contract;
     } catch (e) {
@@ -146,7 +152,7 @@ class FaceEmbeddingService {
     final interpreter = await _loadInterpreter();
     if (interpreter == null) return null;
     try {
-      final contract = await loadContract();
+      final contract = await _loadContract();
       if (contract == null) {
         debugPrint('Embedding rejected: no model contract available');
         return null;
@@ -198,7 +204,7 @@ class FaceEmbeddingService {
   /// Entrance point: validates the flat pixel buffer length against the
   /// model's verified input and runs [embed].
   static Future<Float32List?> embedPixels(Float32List pixels) async {
-    final contract = await loadContract();
+    final contract = await _loadContract();
     if (contract == null) {
       debugPrint('Embedding rejected: model not introspected');
       return null;

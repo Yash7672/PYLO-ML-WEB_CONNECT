@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/constants/app_colors.dart';
 import '../../../core/utils/notification_helper.dart';
+import '../../../core/utils/undo_manager.dart';
 import '../../../core/widgets/glass_components.dart';
 import '../../../features/tasks/screens/add_edit_task_screen.dart';
 import '../../../models/task_model.dart';
@@ -10,15 +11,6 @@ import '../../../providers/task_provider.dart';
 import '../../../theme/app_theme.dart';
 import '../../../utils/extensions.dart';
 
-/// Text colors that stay readable on dark glass surfaces.
-Color _secondaryText(BuildContext context) =>
-    isGlassTheme(context)
-        ? GlassColors.textSecondary
-        : Colors.grey[600]!;
-Color _mutedText(BuildContext context) =>
-    isGlassTheme(context)
-        ? GlassColors.textMuted
-        : Colors.grey[500]!;
 Color _mutedIcon(BuildContext context) =>
     isGlassTheme(context)
         ? GlassColors.textMuted
@@ -46,25 +38,25 @@ class TaskListItem extends ConsumerWidget {
       ),
       direction: DismissDirection.endToStart,
       onDismissed: (_) {
-        ref.read(taskProvider.notifier).deleteTask(task.id);
-        messenger.showSnackBar(
-          SnackBar(
-            content: const Text('Task moved to trash'),
-            action: SnackBarAction(
-              label: 'Undo',
-              onPressed: () async {
-                final restored = await ref
-                    .read(taskProvider.notifier)
-                    .restoreTask(task.id);
-                if (restored != null &&
-                    ref
-                        .read(settingsPreferencesProvider)
-                        .notificationsEnabled) {
-                  _scheduleReminderIfNeeded(restored);
-                }
-              },
-            ),
-          ),
+        // Capture the notifier + notification flag NOW, not inside the Undo
+        // callback flow: swipe-delete unmounts this TaskListItem before the
+        // user taps Undo, and reading `ref` from an unmounted consumer throws
+        // `StateError: Cannot use "ref" after the widget was disposed` from
+        // inside the SnackBar's onTap — aborting the restore.
+        final taskNotifier = ref.read(taskProvider.notifier);
+        final notificationsEnabled =
+            ref.read(settingsPreferencesProvider).notificationsEnabled;
+        deleteWithUndo<TaskDeleteSnapshot>(
+          messenger,
+          message: 'Task deleted',
+          performDelete: () => taskNotifier.deleteTaskForUndo(task),
+          undo: (snapshot) async {
+            final restored =
+                await taskNotifier.restoreTaskFromSnapshot(snapshot);
+            if (restored != null && notificationsEnabled) {
+              _scheduleReminderIfNeeded(restored);
+            }
+          },
         );
       },
       child: Card(
@@ -136,8 +128,8 @@ class TaskListItem extends ConsumerWidget {
                             overflow: TextOverflow.ellipsis,
                             style: theme.textTheme.bodySmall?.copyWith(
                                 color: task.isCompleted
-                                    ? _mutedText(context)
-                                    : _secondaryText(context)),
+                                    ? glassMutedText(context)
+                                    : glassSecondaryText(context)),
                           ),
                         ),
                       const SizedBox(height: 6),
@@ -159,11 +151,11 @@ class TaskListItem extends ConsumerWidget {
                           ),
                           const SizedBox(width: 8),
                           Icon(Icons.calendar_today,
-                              size: 12, color: _mutedText(context)),
+                              size: 12, color: glassMutedText(context)),
                           const SizedBox(width: 4),
                           Text(task.dueDate.toDisplayString(),
                               style: theme.textTheme.labelSmall
-                                  ?.copyWith(color: _mutedText(context))),
+                                  ?.copyWith(color: glassMutedText(context))),
                           if (task.alarmEnabled && task.alarmTime != null) ...[
                             const SizedBox(width: 8),
                             const Icon(Icons.alarm,
@@ -347,7 +339,7 @@ class TaskListItem extends ConsumerWidget {
                   if (task.description.isNotEmpty)
                     Text(task.description,
                         style: theme.textTheme.bodyLarge
-                            ?.copyWith(color: _secondaryText(context))),
+                            ?.copyWith(color: glassSecondaryText(context))),
                   const SizedBox(height: 16),
                   Row(
                     children: [
@@ -370,7 +362,7 @@ class TaskListItem extends ConsumerWidget {
                   if (task.checklist.isEmpty)
                     Text('No checklist items.',
                         style: theme.textTheme.bodyMedium
-                            ?.copyWith(color: _secondaryText(context)))
+                            ?.copyWith(color: glassSecondaryText(context)))
                   else
                     Column(
                       children: task.checklist

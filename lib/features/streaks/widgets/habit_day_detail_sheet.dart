@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 
+import '../../../core/utils/undo_snackbar.dart';
 import '../../../core/widgets/glass_components.dart';
 import '../../../models/habit_completion_item.dart';
 import '../../../models/habit_model.dart';
@@ -9,10 +10,6 @@ import '../../../providers/database_provider.dart';
 import '../../../providers/task_provider.dart';
 import '../../../theme/app_theme.dart';
 
-/// Colors that stay readable on dark glass surfaces.
-Color _secondaryText(BuildContext context) => isGlassTheme(context)
-    ? GlassColors.textSecondary
-    : Colors.grey[600]!;
 Color _hairlineBorder(BuildContext context) => isGlassTheme(context)
     ? GlassColors.borderStrong
     : Colors.grey.shade300;
@@ -82,21 +79,26 @@ class _HabitDayDetailSheetState extends ConsumerState<_HabitDayDetailSheet> {
   }
 
   Future<void> _loadItems() async {
-    if (!mounted) return;
-    final dbHelper = ref.read(databaseProvider);
-    final notifier = ref.read(habitsProvider.notifier);
-    // Both queries are independent — run them concurrently instead of
-    // serially so the sheet opens as soon as the slower one completes.
-    final results = await Future.wait([
-      dbHelper.getCompletionChecklist(widget.habit.id, _dateKey),
-      notifier.isCompletedOnDate(widget.habit.id, widget.day),
-    ]);
-    if (!mounted) return;
-    setState(() {
-      _items = results[0] as List<HabitCompletionItem>;
-      _isCompleted = results[1] as bool;
-      _isLoading = false;
-    });
+    try {
+      if (!mounted) return;
+      final dbHelper = ref.read(databaseProvider);
+      final notifier = ref.read(habitsProvider.notifier);
+      // Both queries are independent — run them concurrently instead of
+      // serially so the sheet opens as soon as the slower one completes.
+      final results = await Future.wait([
+        dbHelper.getCompletionChecklist(widget.habit.id, _dateKey),
+        notifier.isCompletedOnDate(widget.habit.id, widget.day),
+      ]);
+      if (!mounted) return;
+      setState(() {
+        _items = results[0] as List<HabitCompletionItem>;
+        _isCompleted = results[1] as bool;
+        _isLoading = false;
+      });
+    } catch (e) {
+      debugPrint('Error loading day details: $e');
+      if (mounted) setState(() => _isLoading = false);
+    }
   }
 
   Future<void> _markAsStreak() async {
@@ -111,8 +113,11 @@ class _HabitDayDetailSheetState extends ConsumerState<_HabitDayDetailSheet> {
     setState(() => _isProcessing = false);
     messenger.showSnackBar(
       SnackBar(
-        content: Text('Marked as streak for ${DateFormat('d MMM yyyy').format(widget.day)}'),
-        backgroundColor: Colors.green,
+        content: Text(
+          'Marked as streak for ${DateFormat('d MMM yyyy').format(widget.day)}',
+          style: const TextStyle(color: Colors.white),
+        ),
+        backgroundColor: Colors.green.shade800,
       ),
     );
   }
@@ -122,16 +127,19 @@ class _HabitDayDetailSheetState extends ConsumerState<_HabitDayDetailSheet> {
     final messenger = ScaffoldMessenger.of(context);
     final notifier = ref.read(habitsProvider.notifier);
     setState(() => _isProcessing = true);
-    await notifier.unmarkHabitDate(widget.habit.id, widget.day);
+    final snapshot =
+        await notifier.unmarkHabitDateForUndo(widget.habit.id, widget.day);
     if (!mounted) return;
     await _loadItems();
     if (!mounted) return;
     setState(() => _isProcessing = false);
-    messenger.showSnackBar(
-      SnackBar(
-        content: Text('Removed streak for ${DateFormat('d MMM yyyy').format(widget.day)}'),
-        backgroundColor: Colors.orange,
-      ),
+    if (snapshot == null) return;
+    showDeleteUndoSnackBar<HabitUnmarkSnapshot>(
+      messenger,
+      message:
+          'Removed streak for ${DateFormat('d MMM yyyy').format(widget.day)}',
+      backup: snapshot,
+      onUndo: (kept) => notifier.restoreUnmarkedDay(kept),
     );
   }
 
@@ -148,11 +156,15 @@ class _HabitDayDetailSheetState extends ConsumerState<_HabitDayDetailSheet> {
     );
 
     final dbHelper = ref.read(databaseProvider);
-    await dbHelper.addCompletionItem(item);
-    if (!mounted) return;
-    _addController.clear();
-    if (!mounted) return;
-    await _loadItems();
+    try {
+      await dbHelper.addCompletionItem(item);
+      if (!mounted) return;
+      _addController.clear();
+      if (!mounted) return;
+      await _loadItems();
+    } catch (e) {
+      debugPrint('Error adding item: $e');
+    }
   }
 
   Future<void> _editItem(HabitCompletionItem item) async {
@@ -163,11 +175,15 @@ class _HabitDayDetailSheetState extends ConsumerState<_HabitDayDetailSheet> {
     if (result != null && result.trim().isNotEmpty && result.trim() != item.text) {
       if (!mounted) return;
       final dbHelper = ref.read(databaseProvider);
-      await dbHelper.updateCompletionItem(
-        item.copyWith(text: result.trim()),
-      );
-      if (!mounted) return;
-      await _loadItems();
+      try {
+        await dbHelper.updateCompletionItem(
+          item.copyWith(text: result.trim()),
+        );
+        if (!mounted) return;
+        await _loadItems();
+      } catch (e) {
+        debugPrint('Error updating item: $e');
+      }
     }
   }
 
@@ -182,7 +198,8 @@ class _HabitDayDetailSheetState extends ConsumerState<_HabitDayDetailSheet> {
               onPressed: () => Navigator.pop(context, false),
               child: const Text('Cancel')),
           FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            style: FilledButton.styleFrom(
+                backgroundColor: Colors.red, foregroundColor: Colors.white),
             onPressed: () => Navigator.pop(context, true),
             child: const Text('Delete'),
           ),
@@ -192,9 +209,26 @@ class _HabitDayDetailSheetState extends ConsumerState<_HabitDayDetailSheet> {
     if (confirmed == true) {
       if (!mounted) return;
       final dbHelper = ref.read(databaseProvider);
-      await dbHelper.deleteCompletionItem(item.id);
-      if (!mounted) return;
-      await _loadItems();
+      final row = item.toMap();
+      try {
+        await dbHelper.deleteCompletionItem(item.id);
+        if (!mounted) return;
+        await _loadItems();
+        if (!mounted) return;
+        final messenger = ScaffoldMessenger.of(context);
+        showDeleteUndoSnackBar<Map<String, dynamic>>(
+          messenger,
+          message: 'Item deleted',
+          backup: row,
+          onUndo: (kept) async {
+            await dbHelper
+                .addCompletionItem(HabitCompletionItem.fromMap(kept));
+            if (mounted) await _loadItems();
+          },
+        );
+      } catch (e) {
+        debugPrint('Error deleting item: $e');
+      }
     }
   }
 
@@ -240,7 +274,7 @@ class _HabitDayDetailSheetState extends ConsumerState<_HabitDayDetailSheet> {
                         Text(
                           widget.habit.name,
                           style: theme.textTheme.bodySmall
-                              ?.copyWith(color: _secondaryText(context)),
+                              ?.copyWith(color: glassSecondaryText(context)),
                         ),
                       ],
                     ),
@@ -328,7 +362,7 @@ class _HabitDayDetailSheetState extends ConsumerState<_HabitDayDetailSheet> {
                       child: Text(
                         'No checklist recorded for this day.',
                         style: TextStyle(
-                            color: _secondaryText(context), fontSize: 14),
+                            color: glassSecondaryText(context), fontSize: 14),
                       ),
                     )
                 else
@@ -384,7 +418,7 @@ class _HabitDayDetailSheetState extends ConsumerState<_HabitDayDetailSheet> {
                         ? 'Not completed today. Use the Streak button above to mark it, or complete from the habit card.'
                         : 'Not completed on this day. Use the Streak button above to mark it manually.',
                     style: TextStyle(
-                        color: _secondaryText(context), fontSize: 14),
+                        color: glassSecondaryText(context), fontSize: 14),
                   ),
                 ),
               ],
@@ -404,15 +438,18 @@ class _StatusBadge extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final base = isCompleted ? Colors.green : Colors.orange;
+    // Dark literal shades (green.shade700 etc.) vanish on dark surfaces; pick
+    // a readable shade per brightness for the text and border.
+    final shade = isDark ? base.shade300 : base.shade700;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
       decoration: BoxDecoration(
-        color: isCompleted
-            ? Colors.green.withValues(alpha: 0.1)
-            : Colors.orange.withValues(alpha: 0.1),
+        color: base.withValues(alpha: 0.1),
         borderRadius: BorderRadius.circular(20),
         border: Border.all(
-          color: isCompleted ? Colors.green.shade300 : Colors.orange.shade300,
+          color: shade,
         ),
       ),
       child: Row(
@@ -421,14 +458,14 @@ class _StatusBadge extends StatelessWidget {
           Icon(
             isCompleted ? Icons.check_circle : Icons.cancel_outlined,
             size: 18,
-            color: isCompleted ? Colors.green : Colors.orange,
+            color: base,
           ),
           const SizedBox(width: 8),
           Text(
             isCompleted ? '✓ Streak' : '✕ Missed',
             style: TextStyle(
               fontWeight: FontWeight.w600,
-              color: isCompleted ? Colors.green.shade700 : Colors.orange.shade700,
+              color: shade,
             ),
           ),
         ],
@@ -481,7 +518,7 @@ class _CompletionTile extends StatelessWidget {
                     item.completed ? null : TextDecoration.lineThrough,
                 color: item.completed
                     ? Theme.of(context).colorScheme.onSurface
-                    : _secondaryText(context),
+                    : glassSecondaryText(context),
               ),
             ),
           ),

@@ -28,7 +28,7 @@ class GlassDepthConfig {
 
   static const level1 = GlassDepthConfig(
     depth: GlassDepth.level1,
-    opacity: 0.55,
+    opacity: 0.79,
     blur: 14,
     elevation: 0,
     borderColor: GlassColors.border,
@@ -42,7 +42,7 @@ class GlassDepthConfig {
   /// roughly 40% on the two largest surfaces.
   static const level2 = GlassDepthConfig(
     depth: GlassDepth.level2,
-    opacity: 0.70,
+    opacity: 0.91,
     blur: 14,
     elevation: 2,
     borderColor: GlassColors.borderMedium,
@@ -51,7 +51,7 @@ class GlassDepthConfig {
 
   static const level3 = GlassDepthConfig(
     depth: GlassDepth.level3,
-    opacity: 0.84,
+    opacity: 0.96,
     blur: 16,
     elevation: 6,
     borderColor: GlassColors.borderStrong,

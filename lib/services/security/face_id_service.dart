@@ -1,11 +1,8 @@
 import 'dart:io';
 import 'dart:math' as math;
-import 'dart:typed_data';
 
 import 'package:camera/camera.dart';
 import 'package:flutter/foundation.dart';
-import 'package:google_mlkit_commons/google_mlkit_commons.dart'
-    show InputImage;
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
 import 'package:image/image.dart' as img;
 
@@ -22,13 +19,6 @@ class FaceProcessingResult {
   final String? failReason;
   final Face? face; // for liveness tracking
   final Float32List? embedding; // model output, 192-d
-
-  const FaceProcessingResult._({
-    required this.success,
-    this.failReason,
-    this.face,
-    this.embedding,
-  });
 
   const FaceProcessingResult.noFace()
       : success = false,
@@ -48,11 +38,9 @@ class FaceProcessingResult {
         face = null,
         embedding = null;
 
-  const FaceProcessingResult.ok(Face face, Float32List embedding)
+  const FaceProcessingResult.ok(this.face, this.embedding)
       : success = true,
-        failReason = null,
-        face = face,
-        embedding = embedding;
+        failReason = null;
 }
 
 // ---------------------------------------------------------------------------
@@ -161,7 +149,7 @@ Float32List? _alignAndNormalize(_AlignFaceRequest req) {
     );
 
     // Extract RGB bytes and normalize to [-1, 1].
-    final sidePx = FaceIdConfig.modelInputSize;
+    const sidePx = FaceIdConfig.modelInputSize;
     final outPixels = Float32List(sidePx * sidePx * 3);
     for (var y = 0; y < sidePx; y++) {
       for (var x = 0; x < sidePx; x++) {

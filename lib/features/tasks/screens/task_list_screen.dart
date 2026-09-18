@@ -2,7 +2,6 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import '../../../models/task_model.dart';
 import '../../../providers/task_provider.dart';
 import '../../dashboard/widgets/task_list_item.dart';
 
@@ -14,9 +13,6 @@ class TaskListScreen extends ConsumerStatefulWidget {
 }
 
 class _TaskListScreenState extends ConsumerState<TaskListScreen> {
-  String _queryLower = '';
-  String _filter = 'Today';
-  bool _showArchived = false;
   Timer? _debounce;
 
   @override
@@ -27,36 +23,8 @@ class _TaskListScreenState extends ConsumerState<TaskListScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final tasks = ref.watch(allTasksProvider);
-    // Single clock read for the whole build; per-task DateTime.now() calls
-    // used to create a fresh clock value for every task in the list.
-    final now = DateTime.now();
-    final showArchived = _showArchived || _filter == 'Archived';
-    final archivedTasks = showArchived
-        ? ref.watch(archivedTasksProvider).valueOrNull ?? []
-        : const <Task>[];
-    final allVisibleTasks = [...tasks, ...archivedTasks];
-    final filteredTasks = allVisibleTasks.where((task) {
-      final matchesQuery = _queryLower.isEmpty ||
-          task.title.toLowerCase().contains(_queryLower) ||
-          task.category.toLowerCase().contains(_queryLower) ||
-          task.notes.toLowerCase().contains(_queryLower);
-
-      final matchesFilter = switch (_filter) {
-        'Today' =>
-          task.dueDate.year == now.year &&
-              task.dueDate.month == now.month &&
-              task.dueDate.day == now.day,
-        'Completed' => task.isCompleted,
-        'Pending' => !task.isCompleted,
-        'Favorites' => task.isFavorite,
-        'Pinned' => task.isPinned,
-        'Archived' => task.isArchived,
-        _ => true,
-      };
-
-      return matchesQuery && matchesFilter;
-    }).toList();
+    final filterState = ref.watch(taskFilterStateProvider);
+    final filteredTasks = ref.watch(filteredTaskListProvider);
 
     return Scaffold(
       appBar: AppBar(title: const Text('Tasks')),
@@ -76,9 +44,12 @@ class _TaskListScreenState extends ConsumerState<TaskListScreen> {
                   // Guard against async firing if the screen is popped while
                   // the debounce window is still running.
                   if (!mounted) return;
-                  setState(() {
-                    _queryLower = value.toLowerCase();
-                  });
+                  // Re-read the CURRENT filter state at fire time: a 300 ms-old
+                  // snapshot would otherwise revert a filter or archived toggle
+                  // the user changed while the debounce was pending.
+                  ref.read(taskFilterStateProvider.notifier).state = ref
+                      .read(taskFilterStateProvider)
+                      .copyWith(queryLower: value.toLowerCase());
                 });
               },
             ),
@@ -89,7 +60,7 @@ class _TaskListScreenState extends ConsumerState<TaskListScreen> {
               decoration: const InputDecoration(
                   labelText: 'Filter', border: OutlineInputBorder()),
               child: DropdownButton<String>(
-                value: _filter,
+                value: filterState.filter,
                 isExpanded: true,
                 underline: const SizedBox.shrink(),
                 items: const [
@@ -101,7 +72,10 @@ class _TaskListScreenState extends ConsumerState<TaskListScreen> {
                   DropdownMenuItem(value: 'Pinned', child: Text('Pinned')),
                   DropdownMenuItem(value: 'Archived', child: Text('Archived')),
                 ],
-                onChanged: (value) => setState(() => _filter = value ?? 'All'),
+                onChanged: (value) {
+                  ref.read(taskFilterStateProvider.notifier).state =
+                      filterState.copyWith(filter: value ?? 'All');
+                },
               ),
             ),
           ),
@@ -111,8 +85,11 @@ class _TaskListScreenState extends ConsumerState<TaskListScreen> {
             child: SwitchListTile.adaptive(
               contentPadding: EdgeInsets.zero,
               title: const Text('Show archived tasks'),
-              value: _showArchived,
-              onChanged: (value) => setState(() => _showArchived = value),
+              value: filterState.showArchived,
+              onChanged: (value) {
+                ref.read(taskFilterStateProvider.notifier).state =
+                    filterState.copyWith(showArchived: value);
+              },
             ),
           ),
           Expanded(

@@ -16,20 +16,24 @@ class ProfileNotifier extends StateNotifier<Profile> {
   }
 
   Future<void> _loadProfile() async {
-    final prefs = await _getPrefs();
-    final profile = Profile(
-      name: prefs.getString('profile_name') ?? state.name,
-      email: prefs.getString('profile_email') ?? state.email,
-      phone: prefs.getString('profile_phone') ?? state.phone,
-      bio: prefs.getString('profile_bio') ?? state.bio,
-      imagePath: prefs.getString('profile_image_path'),
-    );
-    state = profile;
+    try {
+      final prefs = await _getPrefs();
+      final profile = Profile(
+        name: prefs.getString('profile_name') ?? state.name,
+        email: prefs.getString('profile_email') ?? state.email,
+        phone: prefs.getString('profile_phone') ?? state.phone,
+        bio: prefs.getString('profile_bio') ?? state.bio,
+        imagePath: prefs.getString('profile_image_path'),
+      );
+      state = profile;
+    } catch (e) {
+      debugPrint('Error loading profile: $e');
+    }
   }
 
   Future<void> updateProfile(Profile profile) async {
-    final prefs = await _getPrefs();
     try {
+      final prefs = await _getPrefs();
       // Batch all preference writes
       await Future.wait([
         prefs.setString('profile_name', profile.name),

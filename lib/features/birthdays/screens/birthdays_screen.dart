@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 
+import '../../../core/utils/undo_snackbar.dart';
 import '../../../core/widgets/dialog_disposer.dart';
 import '../../../core/widgets/glass_components.dart';
 import '../../../models/birthday_model.dart';
@@ -308,7 +309,8 @@ class BirthdaysScreen extends ConsumerWidget {
               onPressed: () => Navigator.pop(context, false),
               child: const Text('Cancel')),
           FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            style: FilledButton.styleFrom(
+              backgroundColor: Colors.red, foregroundColor: Colors.white),
             onPressed: () => Navigator.pop(context, true),
             child: const Text('Delete'),
           ),
@@ -316,7 +318,20 @@ class BirthdaysScreen extends ConsumerWidget {
       ),
     );
     if (confirmed == true) {
-      await ref.read(birthdayProvider.notifier).deleteBirthday(birthday.id);
+      if (!context.mounted) return;
+      final messenger = ScaffoldMessenger.of(context);
+      final row = await ref
+          .read(birthdayProvider.notifier)
+          .deleteBirthdayForUndo(birthday);
+      if (row == null) return;
+      showDeleteUndoSnackBar<Map<String, dynamic>>(
+        messenger,
+        message: 'Birthday deleted',
+        backup: row,
+        onUndo: (kept) => ref
+            .read(birthdayProvider.notifier)
+            .restoreBirthday(kept, notificationsEnabled: true),
+      );
     }
   }
 

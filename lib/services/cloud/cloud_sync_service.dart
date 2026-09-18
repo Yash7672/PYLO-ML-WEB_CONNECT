@@ -100,6 +100,12 @@ class CloudSyncService {
   RealtimeChannel? _realtimeChannel;
   String? _realtimeForUserId;
 
+  /// True while the realtime channel has reported a live subscription. While
+  /// it is up the 30 s fallback poll is skipped (the channel is the fast
+  /// path); _onRealtimeStatus clears it and restarts the poll the moment the
+  /// channel closes, times out, or errors so syncing never silently stalls.
+  bool _isRealtimeUp = false;
+
   /// Bumped whenever remote daily_data changes have been merged into SQLite.
   /// The app shell listens to this to reload providers and refresh the UI.
   final ValueNotifier<bool> remoteDataApplied = ValueNotifier<bool>(false);
@@ -326,7 +332,7 @@ class CloudSyncService {
       );
     } catch (e) {
       if (e is AuthException && (e.statusCode != null || e.code != null)) {
-        final text = (e.message ?? '').toLowerCase();
+        final text = e.message.toLowerCase();
         final code = (e.code ?? '').toLowerCase();
         if (code.contains('over_request_rate_limit') ||
             text.contains('rate limit') ||
@@ -380,7 +386,7 @@ class CloudSyncService {
       return const CloudSyncResult.ok();
     } catch (e) {
       if (e is AuthException && (e.statusCode != null || e.code != null)) {
-        final text = (e.message ?? '').toLowerCase();
+        final text = e.message.toLowerCase();
         final code = (e.code ?? '').toLowerCase();
         if (code.contains('otp_expired') || text.contains('expired')) {
           return const CloudSyncResult.fail(
@@ -1162,12 +1168,23 @@ class CloudSyncService {
   /// "subscribed" join is what a missing realtime publication (or a failed
   /// replication setup) looks like — the periodic pull below still covers it.
   void _onRealtimeStatus(RealtimeSubscribeStatus status, Object? error) {
+    // While the channel is live, skip the redundant 30 s poll; the moment it
+    // drops (closed/timedOut/channelError) fall back to polling so a missed
+    // event, a publication outage, or an app-suspend gap never stalls sync.
+    final wasUp = _isRealtimeUp;
+    if (status == RealtimeSubscribeStatus.subscribed) {
+      _isRealtimeUp = true;
+      if (!wasUp) _stopCloudRefreshTimer();
+    } else {
+      _isRealtimeUp = false;
+      if (wasUp) _startCloudRefreshTimer();
+    }
     if (!kDebugMode) return;
     if (status == RealtimeSubscribeStatus.subscribed) {
       debugPrint('[PYLO SYNC] Realtime subscription started '
           '(user-scoped daily_data)');
     } else if (status == RealtimeSubscribeStatus.closed) {
-      debugPrint('[PYLO SYNC] Realtime subscription closed');
+      debugPrint('[PYLO SYNC] Realtime subscription closed — polling');
     } else if (status == RealtimeSubscribeStatus.timedOut) {
       debugPrint('[PYLO SYNC] Realtime subscription timed out — falling back '
           'to polling');
@@ -1181,6 +1198,7 @@ class CloudSyncService {
 
   void _unsubscribeRealtime() {
     _realtimeForUserId = null;
+    _isRealtimeUp = false;
     final channel = _realtimeChannel;
     if (channel == null) return;
     _realtimeChannel = null;
@@ -1195,7 +1213,12 @@ class CloudSyncService {
   /// Gentle periodic pull so the app still receives website changes even when
   /// the realtime publication is unavailable or an event was missed.
   void _startCloudRefreshTimer() {
-    _cloudRefreshTimer?.cancel();
+    // While a live realtime subscription is actively pushing changes the 30 s
+    // poll is redundant (the status listener restarts it the moment the
+    // channel drops), so skip starting it again — e.g. when a fresh session
+    // comes in while an existing channel (with a different user) is re-keyed.
+    if (_isRealtimeUp) return;
+    _stopCloudRefreshTimer();
     _cloudRefreshTimer = Timer.periodic(_cloudRefreshInterval, (_) {
       unawaited(syncFromCloud());
     });
@@ -1242,7 +1265,7 @@ class CloudSyncService {
 
   /// Stable, server-compatible uuid for the `daily_data.id` PK derived from
   /// (user, date) so upserts never regenerate it.
-  static final Uuid _uuid = Uuid();
+  static const Uuid _uuid = Uuid();
 
   static String _rowId(String userId, String dateKey) {
     return _uuid.v5(Namespace.url.value, '$userId/$dateKey');
@@ -1377,7 +1400,7 @@ class CloudSyncService {
   /// device definitely had connectivity — never a "no internet" report.
   CloudSyncResult? _mapServerAuthError(AuthException e) {
     final code = (e.code ?? '').toLowerCase();
-    final message = (e.message ?? '').toLowerCase();
+    final message = e.message.toLowerCase();
 
     if (code.contains('invalid_api_key') ||
         message.contains('invalid api key')) {

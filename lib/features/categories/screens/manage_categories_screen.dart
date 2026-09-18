@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../../core/utils/undo_snackbar.dart';
 import '../../../core/widgets/dialog_disposer.dart';
 import '../../../models/category_icons.dart';
 import '../../../models/category_model.dart';
@@ -189,8 +190,8 @@ class ManageCategoriesScreen extends ConsumerWidget {
     } on StateError catch (e) {
       if (!context.mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(e.message),
-          backgroundColor: Colors.orange));
+          content: Text(e.message, style: const TextStyle(color: Colors.white)),
+          backgroundColor: Colors.orange.shade900));
       // Re-open the dialog so the user can correct the name.
       if (context.mounted) {
         _showCategoryDialog(context, ref, category: category);
@@ -221,7 +222,8 @@ class ManageCategoriesScreen extends ConsumerWidget {
               onPressed: () => Navigator.pop(context, false),
               child: const Text('Cancel')),
           FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            style: FilledButton.styleFrom(
+              backgroundColor: Colors.red, foregroundColor: Colors.white),
             onPressed: () => Navigator.pop(context, true),
             child: const Text('Delete'),
           ),
@@ -229,17 +231,31 @@ class ManageCategoriesScreen extends ConsumerWidget {
       ),
     );
     if (confirmed != true) return;
-    final ok =
-        await ref.read(categoriesProvider.notifier).deleteCategory(category);
-    if (ok) {
-      // Reassigned tasks must be re-read so chips/filters drop the old name.
-      await ref.read(taskProvider.notifier).loadTasks();
+    if (!context.mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    final snapshot = await ref
+        .read(categoriesProvider.notifier)
+        .deleteCategoryForUndo(category);
+    if (snapshot == null) {
+      messenger.showSnackBar(SnackBar(
+          content: const Text('Could not delete the category.',
+              style: TextStyle(color: Colors.white)),
+          backgroundColor: Colors.red.shade800));
+      return;
     }
-    if (!ok && context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('Could not delete the category.'),
-          backgroundColor: Colors.red));
-    }
+    // Reassigned tasks must be re-read so chips/filters drop the old name.
+    await ref.read(taskProvider.notifier).loadTasks();
+    showDeleteUndoSnackBar<CategoryDeleteSnapshot>(
+      messenger,
+      message: 'Category deleted',
+      backup: snapshot,
+      onUndo: (kept) async {
+        await ref
+            .read(categoriesProvider.notifier)
+            .restoreCategory(kept);
+        await ref.read(taskProvider.notifier).loadTasks();
+      },
+    );
   }
 
   Color _parseColor(String hex) {

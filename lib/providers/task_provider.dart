@@ -18,6 +18,15 @@ final taskProvider =
   return TaskNotifier(dbHelper);
 });
 
+/// Snapshot of a task's full DB row captured just before a swipe-delete, so an
+/// Undo action can re-insert the exact same row (original ID, embedded
+/// checklist and every field) the way Lists and Habits restore their own.
+class TaskDeleteSnapshot {
+  final Map<String, dynamic> taskRow;
+
+  const TaskDeleteSnapshot({required this.taskRow});
+}
+
 class TaskNotifier extends StateNotifier<AsyncValue<List<Task>>> {
   final DatabaseHelper dbHelper;
   Timer? _midnightTimer;
@@ -149,12 +158,14 @@ class TaskNotifier extends StateNotifier<AsyncValue<List<Task>>> {
   }
 
   Future<void> archiveTask(String id) async {
+    List<int>? reminderMinutes;
+    var archived = false;
     await _runExclusive(() async {
       final tasks = _currentTasks;
       final index = tasks.indexWhere((t) => t.id == id);
-      Task? removed;
       if (index != -1) {
-        removed = tasks[index];
+        final removed = tasks[index];
+        reminderMinutes = removed.reminderMinutes;
         final updated = List<Task>.from(tasks);
         updated.removeAt(index);
         _updateState(updated);
@@ -162,15 +173,20 @@ class TaskNotifier extends StateNotifier<AsyncValue<List<Task>>> {
       _dataRevision++;
       try {
         await dbHelper.archiveTask(id);
-        await NotificationHelper.cancelAllForTask(
-          id,
-          reminderMinutes: removed?.reminderMinutes,
-        );
+        archived = true;
       } catch (e) {
         debugPrint('Error archiving task: $e');
         await loadTasks();
       }
     });
+    // Notification/alarm teardown is a platform-channel side effect and must
+    // never run inside the serialized mutation queue: a stalled or
+    // never-resolving cancel would freeze the queue that an Undo
+    // (restoreTask) is chained behind, silently killing every later
+    // delete/restore. Cancel asynchronously once the DB write is durable.
+    if (archived) {
+      unawaited(_cancelTaskNotifications(id, reminderMinutes));
+    }
   }
 
   /// Restores the exact soft-deleted task row (same id, all original fields)
@@ -201,6 +217,7 @@ class TaskNotifier extends StateNotifier<AsyncValue<List<Task>>> {
     final tasks = _currentTasks;
     final index = tasks.indexWhere((t) => t.id == id);
     final removed = index != -1 ? tasks[index] : null;
+    final reminderMinutes = removed?.reminderMinutes;
     if (index != -1) {
       _updateState(List<Task>.from(tasks)..removeAt(index));
     }
@@ -208,37 +225,122 @@ class TaskNotifier extends StateNotifier<AsyncValue<List<Task>>> {
     await _runExclusive(() async {
       try {
         await dbHelper.deleteTask(id);
-        await NotificationHelper.cancelAllForTask(
-          id,
-          reminderMinutes: removed?.reminderMinutes,
-        );
       } catch (e) {
         debugPrint('Error deleting task: $e');
-      } finally {
-        // Re-sync state with the DB so an interleaved reload (e.g. midnight
-        // refresh) can never resurrect the row that was just deleted.
+        // The optimistic removal above must not be kept when the DB write
+        // failed — reconcile with the real rows.
+        _dataRevision++;
         await loadTasks();
       }
     });
+    // Teardown outside the mutation queue for the same reason as archiveTask:
+    // a hung notification platform-channel call must never freeze the queue
+    // that an Undo (restoreTask) chains behind.
+    unawaited(_cancelTaskNotifications(id, reminderMinutes));
+  }
+
+  /// Swipe-delete that mirrors the Lists/Habits pattern: snapshots the task's
+  /// FULL DB row (the embedded checklist is stored in that row, so capturing
+  /// it captures the checklist), hard-deletes the row, and returns the
+  /// snapshot so Undo can re-insert the exact row under its ORIGINAL id.
+  Future<TaskDeleteSnapshot?> deleteTaskForUndo(Task task) {
+    final id = task.id;
+    // Optimistic synchronous removal so the swiped-away Dismissible leaves the
+    // tree on the same frame (a Dismissible must be gone on the next frame).
+    final tasks = _currentTasks;
+    final index = tasks.indexWhere((t) => t.id == id);
+    final reminderMinutes =
+        index != -1 ? tasks[index].reminderMinutes : task.reminderMinutes;
+    if (index != -1) {
+      _updateState(List<Task>.from(tasks)..removeAt(index));
+    }
+    return _runExclusive(() async {
+      try {
+        final rows = await dbHelper.queryRows('tasks',
+            where: 'id = ?', whereArgs: [id]);
+        if (rows.isEmpty) return null;
+        _dataRevision++;
+        await dbHelper.deleteTaskPermanently(id);
+        return TaskDeleteSnapshot(taskRow: rows.first);
+      } catch (e) {
+        debugPrint('Error deleting task: $e');
+        // The optimistic removal above must not be kept when the DB write
+        // failed — reconcile with the real rows.
+        _dataRevision++;
+        await loadTasks();
+        return null;
+      }
+    }).then((snapshot) {
+      // Notification/alarm teardown must never run inside the serialized
+      // mutation queue: a stalled platform call would freeze the queue an
+      // Undo (restoreTaskFromSnapshot) chains behind.
+      if (snapshot != null) {
+        unawaited(_cancelTaskNotifications(id, reminderMinutes));
+      }
+      return snapshot;
+    });
+  }
+
+  /// Re-inserts the deleted task row under its ORIGINAL id (INSERT OR REPLACE,
+  /// so the embedded checklist and every field survive), reloads state, and
+  /// returns the restored Task so callers can reschedule reminders only on
+  /// real success.
+  Future<Task?> restoreTaskFromSnapshot(TaskDeleteSnapshot snapshot) async {
+    Task? restored;
+    await _runExclusive(() async {
+      try {
+        _dataRevision++;
+        await dbHelper.restoreRows('tasks', [snapshot.taskRow]);
+        restored = Task.fromMap(snapshot.taskRow);
+        // Publish the restored row deterministically, mirroring Lists'
+        // restoreChecklist (read the rows, then assign state directly). The
+        // previous `await loadTasks()` routed through _loadInFlight dedup and
+        // a _dataRevision guard: when ANY load was already in flight at Undo
+        // time it silently reused that stale future, whose guard then bailed
+        // out WITHOUT publishing — the task was restored in the DB but never
+        // reappeared in the UI.
+        _updateState(await dbHelper.getAllTasks());
+      } catch (e) {
+        debugPrint('Error restoring task: $e');
+      }
+    });
+    return restored;
   }
 
   Future<void> deleteTaskPermanently(String id) async {
+    List<int>? reminderMinutes;
     await _runExclusive(() async {
       try {
         final tasks = _currentTasks;
         final index = tasks.indexWhere((t) => t.id == id);
         final removed = index != -1 ? tasks[index] : null;
+        reminderMinutes = removed?.reminderMinutes;
         _dataRevision++;
         await dbHelper.deleteTaskPermanently(id);
-        await NotificationHelper.cancelAllForTask(
-          id,
-          reminderMinutes: removed?.reminderMinutes,
-        );
         _updateState(_currentTasks.where((t) => t.id != id).toList());
       } catch (e) {
         debugPrint('Error permanently deleting task: $e');
       }
     });
+    unawaited(_cancelTaskNotifications(id, reminderMinutes));
+  }
+
+  /// Fire-and-forget notification/alarm teardown for a task removed from the
+  /// active list. Runs OUTSIDE the mutation queue so a stalled (or never
+  /// resolving) platform channel can never freeze the queue that Undo
+  /// (restoreTask) chains behind.
+  Future<void> _cancelTaskNotifications(
+    String id,
+    List<int>? reminderMinutes,
+  ) async {
+    try {
+      await NotificationHelper.cancelAllForTask(
+        id,
+        reminderMinutes: reminderMinutes,
+      );
+    } catch (e) {
+      debugPrint('Failed to cancel notifications for task $id: $e');
+    }
   }
 
   Future<void> toggleTaskCompletion(Task task,
@@ -446,6 +548,74 @@ final todayTasksProvider = Provider<List<Task>>((ref) {
   }).toList();
 });
 
+/// Immutable search/filter state for the tasks list screen. Lives in a
+/// provider so the expensive filter work recomputes only when the inputs
+/// actually change (not on every screen rebuild).
+class TaskFilterState {
+  final String queryLower;
+  final String filter;
+  final bool showArchived;
+
+  const TaskFilterState({
+    this.queryLower = '',
+    this.filter = 'Today',
+    this.showArchived = false,
+  });
+
+  TaskFilterState copyWith({
+    String? queryLower,
+    String? filter,
+    bool? showArchived,
+  }) {
+    return TaskFilterState(
+      queryLower: queryLower ?? this.queryLower,
+      filter: filter ?? this.filter,
+      showArchived: showArchived ?? this.showArchived,
+    );
+  }
+}
+
+final taskFilterStateProvider =
+    StateProvider<TaskFilterState>((ref) => const TaskFilterState());
+
+/// Memoized, filtered task list for the tasks screen. Recomputed only when
+/// the underlying task list or the filter state changes, so the debounced
+/// search box never re-scans every task on an unrelated rebuild.
+final filteredTaskListProvider = Provider<List<Task>>((ref) {
+  final tasks = ref.watch(allTasksProvider);
+  final filterState = ref.watch(taskFilterStateProvider);
+  final showArchived =
+      filterState.showArchived || filterState.filter == 'Archived';
+  final archived = showArchived
+      ? ref.watch(archivedTasksProvider).valueOrNull ?? const <Task>[]
+      : const <Task>[];
+
+  final now = DateTime.now();
+  final all = [...tasks, ...archived];
+
+  return all.where((task) {
+    final matchesQuery = filterState.queryLower.isEmpty ||
+        task.title.toLowerCase().contains(filterState.queryLower) ||
+        task.category.toLowerCase().contains(filterState.queryLower) ||
+        task.notes.toLowerCase().contains(filterState.queryLower);
+
+    final matchesFilter = switch (filterState.filter) {
+      'Today' =>
+        task.dueDate.year == now.year &&
+            task.dueDate.month == now.month &&
+            task.dueDate.day == now.day,
+      'Completed' => task.isCompleted,
+      'Pending' => !task.isCompleted,
+      'Favorites' => task.isFavorite,
+      'Pinned' => task.isPinned,
+      'Archived' => task.isArchived,
+      _ => true,
+    };
+
+    return matchesQuery && matchesFilter;
+  }).toList();
+});
+
 /// Tasks grouped by their local calendar date. Recomputes only when the task
 /// list changes — calendar day-taps and rebuilds read this cached map instead
 /// of re-scanning every task.
@@ -478,6 +648,19 @@ final categoriesProvider =
   final dbHelper = ref.watch(databaseProvider);
   return CategoriesNotifier(dbHelper);
 });
+
+/// Snapshot of a category and the tasks whose category name was reassigned
+/// during its delete, so Undo can restore both the category row and the
+/// original task-to-category mapping.
+class CategoryDeleteSnapshot {
+  final Map<String, dynamic> categoryRow;
+  final List<Map<String, dynamic>> reassignedTasks;
+
+  const CategoryDeleteSnapshot({
+    required this.categoryRow,
+    required this.reassignedTasks,
+  });
+}
 
 class CategoriesNotifier extends StateNotifier<AsyncValue<List<TaskCategory>>> {
   final DatabaseHelper dbHelper;
@@ -552,10 +735,12 @@ class CategoriesNotifier extends StateNotifier<AsyncValue<List<TaskCategory>>> {
     }
   }
 
-  Future<bool> deleteCategory(TaskCategory category) async {
+  /// Deletes a category but first snapshots the category row and the tasks
+  /// whose category name will be reassigned, so Undo can restore the original
+  /// mapping. Returns null on failure so the caller can surface an error.
+  Future<CategoryDeleteSnapshot?> deleteCategoryForUndo(
+      TaskCategory category) async {
     try {
-      // Resolve the fallback dynamically: prefer an existing "Personal",
-      // otherwise any other category. Never invent a name that doesn't exist.
       final current = _current;
       TaskCategory? fallback;
       for (final c in current) {
@@ -566,16 +751,51 @@ class CategoriesNotifier extends StateNotifier<AsyncValue<List<TaskCategory>>> {
         }
         fallback ??= c;
       }
+
+      final categoryRows = await dbHelper.queryRows(
+        'categories',
+        where: 'id = ?',
+        whereArgs: [category.id],
+      );
+      if (categoryRows.isEmpty) return null;
+
+      final reassigned = await dbHelper.queryRows(
+        'tasks',
+        where: 'category = ?',
+        whereArgs: [category.name],
+      );
+
       if (fallback != null) {
         await dbHelper.reassignTasksCategory(category.name, fallback.name);
       }
       await dbHelper.deleteCategory(category.id);
       state =
           AsyncValue.data(current.where((c) => c.id != category.id).toList());
-      return true;
+      return CategoryDeleteSnapshot(
+        categoryRow: categoryRows.first,
+        reassignedTasks: reassigned,
+      );
     } catch (e) {
       debugPrint('Error deleting category: $e');
-      return false;
+      return null;
+    }
+  }
+
+  /// Restores a deleted category and re-attaches the tasks that were
+  /// reassigned away from it back to their original category name.
+  Future<void> restoreCategory(CategoryDeleteSnapshot snapshot) async {
+    try {
+      await dbHelper.restoreRows('categories', [snapshot.categoryRow]);
+      for (final task in snapshot.reassignedTasks) {
+        final taskId = task['id'] as String?;
+        final oldName = task['category'] as String?;
+        if (taskId != null && oldName != null) {
+          await dbHelper.setTaskCategory(taskId, oldName);
+        }
+      }
+      await loadCategories();
+    } catch (e) {
+      debugPrint('Error restoring category: $e');
     }
   }
 }
@@ -653,12 +873,33 @@ class HabitLogItemsNotifier extends StateNotifier<List<HabitLogItem>> {
     }
   }
 
-  Future<void> deleteItem(HabitLogItem item) async {
+  /// Deletes a habit log entry but snapshots its row first so an Undo can
+  /// restore it with the original ID.
+  Future<Map<String, dynamic>?> deleteItemForUndo(HabitLogItem item) async {
     try {
+      final rows = await dbHelper.queryRows(
+        'habit_log_items',
+        where: 'id = ?',
+        whereArgs: [item.id],
+      );
       await dbHelper.deleteHabitLogItem(item.id);
       state = state.where((it) => it.id != item.id).toList();
+      return rows.isEmpty ? null : rows.first;
     } catch (e) {
       debugPrint('Error deleting habit log item: $e');
+      return null;
+    }
+  }
+
+  /// Re-inserts a habit log entry from a snapshot row and reloads the list in
+  /// canonical position order.
+  Future<void> restoreItem(Map<String, dynamic> row) async {
+    try {
+      final item = HabitLogItem.fromMap(row);
+      await dbHelper.createHabitLogItem(item);
+      state = await dbHelper.getHabitLogItems(item.logId);
+    } catch (e) {
+      debugPrint('Error restoring habit log item: $e');
     }
   }
 }
@@ -740,10 +981,54 @@ final streakSummaryProvider = Provider<Map<String, dynamic>>((ref) {
   };
 });
 
+/// Snapshot of a habit and ALL its related rows (logs, log items, completion
+/// checklist) captured just before a hard delete, so an Undo can restore the
+/// entire streak with original IDs.
+class HabitDeleteSnapshot {
+  final Map<String, dynamic> habitRow;
+  final List<Map<String, dynamic>> logs;
+  final List<Map<String, dynamic>> logItems;
+  final List<Map<String, dynamic>> completionItems;
+
+  const HabitDeleteSnapshot({
+    required this.habitRow,
+    required this.logs,
+    required this.logItems,
+    required this.completionItems,
+  });
+}
+
+/// Snapshot of a single day's completion (log row + immutable checklist)
+/// captured just before "Miss Streak" removes it, so Undo can restore it and
+/// recompute the streak history.
+class HabitUnmarkSnapshot {
+  final String habitId;
+  final Map<String, dynamic> log;
+  final List<Map<String, dynamic>> items;
+
+  const HabitUnmarkSnapshot({
+    required this.habitId,
+    required this.log,
+    required this.items,
+  });
+}
+
 class HabitNotifier extends StateNotifier<AsyncValue<List<Habit>>> {
   final DatabaseHelper dbHelper;
   Timer? _midnightTimer;
-  Future<void>? _appendQueue;
+
+  /// Serializes ALL habit mutations (add/delete/restore/…), the same way
+  /// Lists' ChecklistNotifier does, so a delete and its immediate Undo run one
+  /// after the other instead of interleaving their DB writes and state
+  /// refreshes (a restore could otherwise be lost).
+  Future<void>? _mutationQueue;
+
+  Future<T> _runExclusive<T>(Future<T> Function() action) {
+    final result = (_mutationQueue ?? Future.value()).then((_) => action());
+    _mutationQueue =
+        result.then<void>((_) {}, onError: (Object e, StackTrace st) {});
+    return result;
+  }
 
   HabitNotifier(this.dbHelper) : super(const AsyncValue.loading()) {
     loadHabits();
@@ -797,7 +1082,7 @@ class HabitNotifier extends StateNotifier<AsyncValue<List<Habit>>> {
   }
 
   Future<void> addHabit(Habit habit) async {
-    final run = (_appendQueue ?? Future.value()).then((_) async {
+    await _runExclusive(() async {
       try {
         await dbHelper.createHabit(habit);
         _updateState([habit, ..._currentHabits]);
@@ -806,10 +1091,6 @@ class HabitNotifier extends StateNotifier<AsyncValue<List<Habit>>> {
         rethrow;
       }
     });
-    _appendQueue = run.catchError((Object e) {
-      debugPrint('Append queue error (habit): $e');
-    });
-    await run;
   }
 
   Future<void> updateHabit(Habit habit) async {
@@ -827,13 +1108,61 @@ class HabitNotifier extends StateNotifier<AsyncValue<List<Habit>>> {
     }
   }
 
-  Future<void> deleteHabit(String id) async {
-    try {
-      await dbHelper.deleteHabit(id);
-      _updateState(_currentHabits.where((h) => h.id != id).toList());
-    } catch (e) {
-      debugPrint('Error deleting habit: $e');
-    }
+  /// Deletes a habit but first snapshots the habit and every related row
+  /// (logs, log items, completion checklist) so Undo can restore the whole
+  /// streak with its original IDs.
+  Future<HabitDeleteSnapshot?> deleteHabitForUndo(Habit habit) {
+    return _runExclusive(() async {
+      try {
+        final rows = await dbHelper.queryRows(
+          'habits',
+          where: 'id = ?',
+          whereArgs: [habit.id],
+        );
+        if (rows.isEmpty) return null;
+        final snapshot = HabitDeleteSnapshot(
+          habitRow: rows.first,
+          logs: await dbHelper.queryRows(
+            'habit_logs',
+            where: 'habitId = ?',
+            whereArgs: [habit.id],
+          ),
+          logItems: await dbHelper.queryRows(
+            'habit_log_items',
+            where: 'logId LIKE ?',
+            whereArgs: ['${habit.id}-%'],
+          ),
+          completionItems: await dbHelper.queryRows(
+            'habit_completion_items',
+            where: 'habitId = ?',
+            whereArgs: [habit.id],
+          ),
+        );
+        await dbHelper.deleteHabit(habit.id);
+        _updateState(_currentHabits.where((h) => h.id != habit.id).toList());
+        return snapshot;
+      } catch (e) {
+        debugPrint('Error deleting habit: $e');
+        return null;
+      }
+    });
+  }
+
+  /// Re-inserts a deleted habit and all its related rows (original IDs
+  /// preserved via INSERT OR REPLACE), then reloads habits to recompute UI.
+  Future<void> restoreHabit(HabitDeleteSnapshot snapshot) async {
+    await _runExclusive(() async {
+      try {
+        await dbHelper.restoreRows('habits', [snapshot.habitRow]);
+        await dbHelper.restoreRows('habit_logs', snapshot.logs);
+        await dbHelper.restoreRows('habit_log_items', snapshot.logItems);
+        await dbHelper
+            .restoreRows('habit_completion_items', snapshot.completionItems);
+        await loadHabits();
+      } catch (e) {
+        debugPrint('Error restoring habit: $e');
+      }
+    });
   }
 
   Future<Habit?> completeToday(String habitId, {DateTime? now}) async {
@@ -1070,6 +1399,48 @@ class HabitNotifier extends StateNotifier<AsyncValue<List<Habit>>> {
       await dbHelper.saveCompletionChecklist(habitId, dateKey, []);
     } catch (e) {
       debugPrint('Error unmarking habit date: $e');
+    }
+  }
+
+  /// Same as [unmarkHabitDate] but snapshots the removed log row and this
+  /// day's immutable checklist first, so the sheet can offer Undo.
+  Future<HabitUnmarkSnapshot?> unmarkHabitDateForUndo(
+      String habitId, DateTime date) async {
+    try {
+      final dateKey = habitDateKey(date);
+      final logs = await dbHelper.queryRows(
+        'habit_logs',
+        where: 'habitId = ? AND date = ?',
+        whereArgs: [habitId, dateKey],
+      );
+      final items = await dbHelper.queryRows(
+        'habit_completion_items',
+        where: 'habitId = ? AND completionDate = ?',
+        whereArgs: [habitId, dateKey],
+        orderBy: 'position ASC',
+      );
+      await unmarkHabitDate(habitId, date);
+      if (logs.isEmpty) return null;
+      return HabitUnmarkSnapshot(
+        habitId: habitId,
+        log: logs.first,
+        items: items,
+      );
+    } catch (e) {
+      debugPrint('Error unmarking habit date: $e');
+      return null;
+    }
+  }
+
+  /// Restores a day that was unmarked: re-inserts the log row and that day's
+  /// checklist, then recomputes streaks from the restored history.
+  Future<void> restoreUnmarkedDay(HabitUnmarkSnapshot snapshot) async {
+    try {
+      await dbHelper.restoreRows('habit_logs', [snapshot.log]);
+      await dbHelper.restoreRows('habit_completion_items', snapshot.items);
+      await _recalculateStreaks(snapshot.habitId);
+    } catch (e) {
+      debugPrint('Error restoring habit day: $e');
     }
   }
 

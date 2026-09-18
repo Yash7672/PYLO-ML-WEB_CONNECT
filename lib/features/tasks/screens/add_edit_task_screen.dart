@@ -31,6 +31,7 @@ class _AddEditTaskScreenState extends ConsumerState<AddEditTaskScreen> {
   List<ChecklistItemData> _checklist = [];
   bool _alarmEnabled = false;
   DateTime? _alarmTime;
+  int? _repeatMonthday;
 
   final List<String> _priorities = [
     'Critical',
@@ -71,6 +72,10 @@ class _AddEditTaskScreenState extends ConsumerState<AddEditTaskScreen> {
       _checklist = List<ChecklistItemData>.from(widget.taskToEdit!.checklist);
       _alarmEnabled = widget.taskToEdit!.alarmEnabled;
       _alarmTime = widget.taskToEdit!.alarmTime;
+      // Preserve the original day-of-month anchor instead of assuming the
+      // current due date's day. Otherwise editing a monthly/yearly task that
+      // was rescheduled (e.g. to Feb 28) silently re-anchors recurrence.
+      _repeatMonthday = widget.taskToEdit!.repeatMonthday;
     } else {
       _selectedReminders = List<int>.from(
           ref.read(settingsPreferencesProvider).reminderMinutes);
@@ -95,6 +100,9 @@ class _AddEditTaskScreenState extends ConsumerState<AddEditTaskScreen> {
     if (picked != null && mounted) {
       setState(() {
         _dueDate = picked;
+        // The user explicitly re-chose the date, so re-anchor recurrence to
+        // the newly picked day-of-month.
+        _repeatMonthday = picked.day;
         // Re-anchor the chosen start time onto the newly picked date so the
         // task never silently slides to yesterday/another date.
         if (_startTime != null) {
@@ -165,7 +173,7 @@ class _AddEditTaskScreenState extends ConsumerState<AddEditTaskScreen> {
         color: widget.taskToEdit?.color ?? '',
         // Anchor used by monthly/yearly recurrence so rescheduling the task
         // never drifts off the originally chosen day-of-month.
-        repeatMonthday: _dueDate.day,
+        repeatMonthday: _repeatMonthday ?? _dueDate.day,
       );
 
       if (widget.taskToEdit != null) {
@@ -213,6 +221,15 @@ class _AddEditTaskScreenState extends ConsumerState<AddEditTaskScreen> {
 
       if (mounted) {
         Navigator.pop(context);
+      }
+    } catch (e) {
+      debugPrint('Error saving task: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: const Text('Could not save task',
+              style: TextStyle(color: Colors.white)),
+          backgroundColor: Colors.red.shade800,
+        ));
       }
     } finally {
       _saving = false;
@@ -408,11 +425,11 @@ class _AddEditTaskScreenState extends ConsumerState<AddEditTaskScreen> {
                          _selectedReminders.sort();
                        });
                        } else if (diff <= 0) {
-                         if (!mounted) return;
-                         // ignore: use_build_context_synchronously — guarded by mounted check above
-                         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-                         content: Text('Reminder time must be before the task start time'),
-                         backgroundColor: Colors.orange,
+                          if (!context.mounted) return;
+ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                         content: const Text('Reminder time must be before the task start time',
+                             style: TextStyle(color: Colors.white)),
+                         backgroundColor: Colors.orange.shade900,
                        ));
                      }
                    }

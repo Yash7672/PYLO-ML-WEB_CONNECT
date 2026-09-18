@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../../core/utils/undo_manager.dart';
 import '../../../core/widgets/dialog_disposer.dart';
 import '../../../core/widgets/glass_components.dart';
 import '../../../models/habit_model.dart';
@@ -8,10 +9,6 @@ import '../../../theme/app_theme.dart';
 import 'habit_complete_sheet.dart';
 import 'habit_detail_popup.dart';
 
-/// Text/icon colors that stay readable on dark glass surfaces.
-Color _mutedText(BuildContext context) => isGlassTheme(context)
-    ? GlassColors.textMuted
-    : Colors.grey[500]!;
 Color _mutedControl(BuildContext context) =>
     isGlassTheme(context) ? GlassColors.textMuted : Colors.grey;
 
@@ -36,7 +33,7 @@ class HabitCard extends ConsumerWidget {
       margin: const EdgeInsets.only(bottom: 12),
       child: InkWell(
         onTap: () => _showDetailPopup(context, habit),
-        borderRadius: BorderRadius.circular(16),
+        borderRadius: const BorderRadius.all(Radius.circular(16)),
         child: Padding(
           padding: const EdgeInsets.all(16),
           child: Column(
@@ -52,7 +49,7 @@ class HabitCard extends ConsumerWidget {
                           ? Colors.green.withValues(alpha: 0.12)
                           : theme.colorScheme.primaryContainer
                               .withValues(alpha: 0.5),
-                      borderRadius: BorderRadius.circular(12),
+                      borderRadius: const BorderRadius.all(Radius.circular(12)),
                     ),
                     child: Icon(
                       Icons.local_fire_department,
@@ -79,7 +76,7 @@ class HabitCard extends ConsumerWidget {
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: theme.textTheme.bodySmall
-                                ?.copyWith(color: _mutedText(context)),
+                                ?.copyWith(color: glassMutedText(context)),
                           ),
                         ],
                       ],
@@ -93,7 +90,7 @@ class HabitCard extends ConsumerWidget {
                       color: isCompletedToday
                           ? Colors.green
                           : Colors.transparent,
-                      borderRadius: BorderRadius.circular(20),
+                      borderRadius: const BorderRadius.all(Radius.circular(20)),
                       border: isCompletedToday
                           ? null
                           : Border.all(
@@ -113,7 +110,7 @@ class HabitCard extends ConsumerWidget {
                           size: 14,
                           color: isCompletedToday
                               ? Colors.white
-                              : _mutedText(context),
+                              : glassMutedText(context),
                         ),
                         const SizedBox(width: 4),
                         Text(
@@ -123,7 +120,7 @@ class HabitCard extends ConsumerWidget {
                             fontWeight: FontWeight.w700,
                             color: isCompletedToday
                                 ? Colors.white
-                                : _mutedText(context),
+                                : glassMutedText(context),
                             letterSpacing: 0.5,
                           ),
                         ),
@@ -166,12 +163,12 @@ class HabitCard extends ConsumerWidget {
               Row(
                 children: [
                   Icon(Icons.calendar_today_outlined,
-                      size: 14, color: _mutedText(context)),
+                      size: 14, color: glassMutedText(context)),
                   const SizedBox(width: 6),
                   Text(
                     'Last Completed: ${habit.getLastCompletedLabel(referenceDate: now)}',
                     style: theme.textTheme.bodySmall
-                        ?.copyWith(color: _mutedText(context)),
+                        ?.copyWith(color: glassMutedText(context)),
                   ),
                 ],
               ),
@@ -204,8 +201,8 @@ class HabitCard extends ConsumerWidget {
                                 : Colors.grey[600])
                             : Colors.white,
                         minimumSize: const Size.fromHeight(42),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
+shape: const RoundedRectangleBorder(
+                          borderRadius: BorderRadius.all(Radius.circular(12)),
                         ),
                       ),
                     ),
@@ -217,7 +214,7 @@ class HabitCard extends ConsumerWidget {
                     icon: const Icon(Icons.edit_outlined, size: 20),
                     tooltip: 'Edit',
                     style: IconButton.styleFrom(
-                      foregroundColor: _mutedText(context),
+                      foregroundColor: glassMutedText(context),
                     ),
                   ),
                   IconButton(
@@ -318,7 +315,8 @@ class HabitCard extends ConsumerWidget {
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Delete Streak?'),
-        content: const Text('This action cannot be undone.'),
+        content: const Text(
+            'The streak, its history and completion checklist will be removed.'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
@@ -326,7 +324,8 @@ class HabitCard extends ConsumerWidget {
           ),
           FilledButton(
             onPressed: () => Navigator.pop(context, true),
-            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            style: FilledButton.styleFrom(
+                backgroundColor: Colors.red, foregroundColor: Colors.white),
             child: const Text('Delete'),
           ),
         ],
@@ -334,9 +333,16 @@ class HabitCard extends ConsumerWidget {
     );
 
     if (confirm == true) {
-      await ref.read(habitsProvider.notifier).deleteHabit(habit.id);
-      messenger.showSnackBar(
-        const SnackBar(content: Text('Streak deleted!')),
+      // Capture the notifier NOW — deleting unmounts this card before Undo is
+      // tapped, and reading `ref` from the unmounted card throws
+      // `StateError: Cannot use "ref" after the widget was disposed` from
+      // inside the SnackBar's onTap — aborting the restore.
+      final habitNotifier = ref.read(habitsProvider.notifier);
+      deleteWithUndo<HabitDeleteSnapshot>(
+        messenger,
+        message: 'Streak deleted',
+        performDelete: () => habitNotifier.deleteHabitForUndo(habit),
+        undo: (kept) => habitNotifier.restoreHabit(kept),
       );
     }
   }
@@ -363,7 +369,7 @@ class _InfoTile extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       decoration: BoxDecoration(
         color: color.withValues(alpha: 0.08),
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: const BorderRadius.all(Radius.circular(12)),
       ),
       child: Row(
         children: [
@@ -377,7 +383,7 @@ class _InfoTile extends StatelessWidget {
                   label,
                   style: TextStyle(
                     fontSize: 11,
-                    color: _mutedText(context),
+                    color: glassMutedText(context),
                     fontWeight: FontWeight.w500,
                   ),
                 ),

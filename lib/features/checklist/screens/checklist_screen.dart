@@ -1,16 +1,14 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/utils/undo_manager.dart';
 import '../../../core/widgets/dialog_disposer.dart';
 import '../../../core/widgets/glass_components.dart';
 import '../../../models/checklist_model.dart';
 import '../../../providers/checklist_provider.dart';
-import '../../../theme/app_theme.dart';
 import '../widgets/checklist_item.dart';
-
-Color _secondaryText(BuildContext context) => isGlassTheme(context)
-    ? GlassColors.textSecondary
-    : Colors.grey[600]!;
 
 class ChecklistScreen extends ConsumerWidget {
   const ChecklistScreen({super.key});
@@ -66,7 +64,7 @@ class ChecklistScreen extends ConsumerWidget {
                       'Create simple lists like shopping or packing.',
                       textAlign: TextAlign.center,
                       style: theme.textTheme.bodyMedium
-                          ?.copyWith(color: _secondaryText(context)),
+                          ?.copyWith(color: glassSecondaryText(context)),
                     ),
                   ],
                 ),
@@ -204,7 +202,8 @@ class ChecklistScreen extends ConsumerWidget {
               onPressed: () => Navigator.pop(context, false),
               child: const Text('Cancel')),
           FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            style: FilledButton.styleFrom(
+              backgroundColor: Colors.red, foregroundColor: Colors.white),
             onPressed: () => Navigator.pop(context, true),
             child: const Text('Delete'),
           ),
@@ -212,7 +211,17 @@ class ChecklistScreen extends ConsumerWidget {
       ),
     );
     if (confirmed == true) {
-      await ref.read(checklistProvider.notifier).deleteChecklist(checklist.id);
+      if (!context.mounted) return;
+      final messenger = ScaffoldMessenger.of(context);
+      deleteWithUndo<ChecklistDeleteSnapshot>(
+        messenger,
+        message: 'Checklist deleted',
+        performDelete: () => ref
+            .read(checklistProvider.notifier)
+            .deleteChecklistForUndo(checklist),
+        undo: (kept) =>
+            ref.read(checklistProvider.notifier).restoreChecklist(kept),
+      );
     }
   }
 }
@@ -238,8 +247,13 @@ class _ChecklistDetailScreenState extends ConsumerState<ChecklistDetailScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final state = ref.watch(checklistProvider);
-    final items = state.items[widget.checklist.id] ?? const <ChecklistItem>[];
+    // Watch only THIS checklist's item list so toggling items in another
+    // checklist (or renaming any checklist) never rebuilds this screen.
+    final items = ref.watch(
+      checklistProvider.select(
+        (s) => s.items[widget.checklist.id] ?? const <ChecklistItem>[],
+      ),
+    );
     final pending = items.where((i) => !i.completed).length;
 
     return Scaffold(
@@ -252,7 +266,7 @@ class _ChecklistDetailScreenState extends ConsumerState<ChecklistDetailScreen> {
               children: [
                 Text('$pending left',
                     style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                        color: _secondaryText(context),
+                        color: glassSecondaryText(context),
                         fontWeight: FontWeight.w500)),
                 const Spacer(),
                 if (items.any((i) => i.completed))
@@ -268,7 +282,7 @@ class _ChecklistDetailScreenState extends ConsumerState<ChecklistDetailScreen> {
             child: items.isEmpty
                 ? Center(
                     child: Text('Add your first item below.',
-                        style: TextStyle(color: _secondaryText(context))))
+                        style: TextStyle(color: glassSecondaryText(context))))
                 : ListView.builder(
                     padding: const EdgeInsets.all(8),
                     itemCount: items.length,
@@ -315,8 +329,29 @@ class _ChecklistDetailScreenState extends ConsumerState<ChecklistDetailScreen> {
   }
 
   void _clearCompleted(List<ChecklistItem> items) {
-    for (final item in items.where((i) => i.completed)) {
-      ref.read(checklistProvider.notifier).deleteItem(item);
-    }
+    final completed = items.where((i) => i.completed).toList();
+    if (completed.isEmpty) return;
+    final messenger = ScaffoldMessenger.of(context);
+    deleteWithUndo<List<Map<String, dynamic>>>(
+      messenger,
+      message:
+          'Cleared ${completed.length} completed item${completed.length == 1 ? '' : 's'}',
+      // Capture a DB snapshot for each deleted row so Undo restores the exact
+      // persisted data instead of the stale in-memory copy.
+      performDelete: () async {
+        final snapshots = <Map<String, dynamic>>[];
+        for (final item in completed) {
+          final row =
+              await ref.read(checklistProvider.notifier).deleteItemForUndo(item);
+          if (row != null) snapshots.add(row);
+        }
+        return snapshots;
+      },
+      undo: (rows) {
+        for (final row in rows) {
+          ref.read(checklistProvider.notifier).restoreItem(row);
+        }
+      },
+    );
   }
 }

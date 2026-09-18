@@ -22,6 +22,7 @@ class _FocusActiveScreenState extends ConsumerState<FocusActiveScreen>
     with WidgetsBindingObserver {
   bool _navigatedBack = false;
   bool _callActive = false;
+  bool _popConfirmed = false;
   StreamSubscription<String>? _callStateSubscription;
 
   @override
@@ -90,18 +91,36 @@ class _FocusActiveScreenState extends ConsumerState<FocusActiveScreen>
     }
   }
 
+  /// Confirms the pop with the state set, allows PopScope to pop on the next
+  /// rebuild, then pops after that frame. This is the safe way to pop from a
+  /// `PopScope(canPop: false)` — popping immediately would re-trigger the
+  /// callback and infinite-loop.
+  void _finishPop() {
+    if (!mounted) return;
+    setState(() => _popConfirmed = true);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) Navigator.of(context).pop();
+    });
+  }
+
   void _navigateBack() {
     if (_navigatedBack || !mounted) return;
     _navigatedBack = true;
-    Navigator.of(context).pop();
+    _finishPop();
   }
 
-  Future<bool> _onWillPop() async {
+  /// Handles a system-back / gesture attempt. Restores the confirmed-pop
+  /// result that the discarded `_onWillPop` used to produce: strict mode never
+  /// pops, normal mode asks first, and a session that already ended pops.
+  Future<void> _handlePopAttempt() async {
     final focus = ref.read(focusProvider);
-    if (focus.active == null) return true;
+    final active = focus.active;
+    if (active == null) {
+      _finishPop();
+      return;
+    }
 
-    final isStrict = focus.active?.mode == FocusMode.strict;
-    if (isStrict) {
+    if (active.mode == FocusMode.strict) {
       // Strict mode: absolutely no back navigation.
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -111,10 +130,12 @@ class _FocusActiveScreenState extends ConsumerState<FocusActiveScreen>
           ),
         );
       }
-      return false;
+      return;
     }
 
-    return _showExitConfirmation();
+    if (await _showExitConfirmation() && mounted) {
+      _finishPop();
+    }
   }
 
   Future<bool> _showExitConfirmation() async {
@@ -131,7 +152,8 @@ class _FocusActiveScreenState extends ConsumerState<FocusActiveScreen>
           ),
           FilledButton(
             onPressed: () => Navigator.of(ctx).pop(true),
-            style: FilledButton.styleFrom(backgroundColor: Colors.orange),
+            style: FilledButton.styleFrom(
+                backgroundColor: Colors.orange, foregroundColor: Colors.white),
             child: const Text('Leave'),
           ),
         ],
@@ -176,7 +198,8 @@ class _FocusActiveScreenState extends ConsumerState<FocusActiveScreen>
             ),
             FilledButton(
               onPressed: () => Navigator.of(ctx).pop(true),
-              style: FilledButton.styleFrom(backgroundColor: Colors.red),
+              style: FilledButton.styleFrom(
+                backgroundColor: Colors.red, foregroundColor: Colors.white),
               child: const Text('End Focus'),
             ),
           ],
@@ -213,9 +236,9 @@ class _FocusActiveScreenState extends ConsumerState<FocusActiveScreen>
     final isStrict = active.mode == FocusMode.strict;
 
     return PopScope(
-      canPop: false,
+      canPop: _popConfirmed,
       onPopInvokedWithResult: (didPop, result) {
-        if (!didPop) _onWillPop();
+        if (!didPop) _handlePopAttempt();
       },
       child: Scaffold(
         backgroundColor: theme.colorScheme.surface,

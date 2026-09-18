@@ -239,7 +239,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
         padding: const EdgeInsets.all(16.0),
         child: Card(
           shape:
-              RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+              const RoundedRectangleBorder(borderRadius: BorderRadius.all(Radius.circular(20))),
           elevation: 3,
           child: Padding(
             padding: const EdgeInsets.all(20.0),

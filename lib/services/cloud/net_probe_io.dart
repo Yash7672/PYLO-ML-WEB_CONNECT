@@ -69,7 +69,7 @@ Future<HostProbeResult> probeHostReachability(
   );
 }
 
-enum _Stage { ok, dnsFail, tcpFail, tlsFail, unknown }
+enum _Stage { ok, dnsFail, tcpFail, tlsFail }
 
 class _HostProbe {
   final _Stage stage;
@@ -120,13 +120,13 @@ Future<_HostProbe> _probeHost(
     return const _HostProbe.ok();
   } on HandshakeException catch (e) {
     raw.destroy();
-    return _HostProbe.tlsFail('${_brief(e)}');
+    return _HostProbe.tlsFail(_brief(e));
   } on TimeoutException catch (_) {
     raw.destroy();
     return const _HostProbe.tlsFail('TLS handshake timed out');
   } catch (e) {
     raw.destroy();
-    return _HostProbe.tlsFail('${_brief(e)}');
+    return _HostProbe.tlsFail(_brief(e));
   }
 }
 
@@ -168,6 +168,6 @@ String _brief(Object e) {
   } else {
     msg = e.toString();
   }
-  if (msg.length > 110) msg = msg.substring(0, 107).trimRight() + '...';
+  if (msg.length > 110) msg = '${msg.substring(0, 107).trimRight()}...';
   return msg;
 }

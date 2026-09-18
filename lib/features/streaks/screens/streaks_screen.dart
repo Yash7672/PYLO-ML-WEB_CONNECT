@@ -82,9 +82,19 @@ class _StreaksScreenState extends ConsumerState<StreaksScreen> {
                       onPressed: () async {
                         final createdHabit = await _showHabitDialog(context);
                         if (createdHabit != null) {
-                          await ref
-                              .read(habitsProvider.notifier)
-                              .addHabit(createdHabit);
+                          try {
+                            await ref
+                                .read(habitsProvider.notifier)
+                                .addHabit(createdHabit);
+                          } catch (e) {
+                            debugPrint('Error adding streak: $e');
+                            if (context.mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                                  content: const Text('Could not add streak',
+                                      style: TextStyle(color: Colors.white)),
+                                  backgroundColor: Colors.red.shade800));
+                            }
+                          }
                         }
                       },
                       icon: const Icon(Icons.add),
@@ -201,7 +211,19 @@ class _StreaksScreenState extends ConsumerState<StreaksScreen> {
         onPressed: () async {
           final createdHabit = await _showHabitDialog(context);
           if (createdHabit != null) {
-            await ref.read(habitsProvider.notifier).addHabit(createdHabit);
+            try {
+              await ref
+                  .read(habitsProvider.notifier)
+                  .addHabit(createdHabit);
+            } catch (e) {
+              debugPrint('Error adding streak: $e');
+              if (context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                    content: const Text('Could not add streak',
+                        style: TextStyle(color: Colors.white)),
+                    backgroundColor: Colors.red.shade800));
+              }
+            }
           }
         },
         icon: const Icon(Icons.add),

@@ -10,6 +10,14 @@ import '../../theme/glass_depth.dart';
 /// AMOLED always keep their exact existing appearance.
 bool isGlassTheme(BuildContext context) => PyloGlass.isActive(context);
 
+/// Text color for lower-priority labels, readable on dark glass surfaces.
+Color glassSecondaryText(BuildContext context) =>
+    isGlassTheme(context) ? GlassColors.textSecondary : Colors.grey.shade600;
+
+/// Text color for most-muted metadata, readable on dark glass surfaces.
+Color glassMutedText(BuildContext context) =>
+    isGlassTheme(context) ? GlassColors.textMuted : Colors.grey.shade500;
+
 /// Frosted-glass 3-surface wrapper shared by the whole Glass design system.
 ///
 /// In Glass mode it renders a translucent surface at one of the three depth
@@ -119,47 +127,6 @@ class GlassSurface extends StatelessWidget {
   }
 }
 
-/// Physical card preset of [GlassSurface]: level-2 glass with a card radius.
-/// Card's own margin is disabled to match GlassSurface's margin handling.
-class GlassCard extends StatelessWidget {
-  final Widget child;
-  final EdgeInsetsGeometry? padding;
-  final EdgeInsetsGeometry? margin;
-  final VoidCallback? onTap;
-  final Color? surfaceColor;
-
-  const GlassCard({
-    super.key,
-    required this.child,
-    this.padding = const EdgeInsets.all(16),
-    this.margin,
-    this.onTap,
-    this.surfaceColor,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    if (!isGlassTheme(context)) {
-      Widget result = Card(
-        margin: margin ?? EdgeInsets.zero,
-        child: Padding(padding: padding ?? EdgeInsets.zero, child: child),
-      );
-      if (onTap != null) {
-        result = InkWell(onTap: onTap, child: result);
-      }
-      return result;
-    }
-    return GlassSurface(
-      padding: padding,
-      margin: margin,
-      depth: GlassDepth.level2,
-      borderRadius: 18,
-      onTap: onTap,
-      child: child,
-    );
-  }
-}
-
 /// Glass-themed button with press feedback. In non-Glass themes it renders a
 /// standard [FilledButton] with identical shape/behaviour.
 class GlassButton extends StatelessWidget {
@@ -244,94 +211,6 @@ class GlassButton extends StatelessWidget {
   }
 }
 
-/// Glass-themed icon button. Non-Glass renders a plain [IconButton].
-class GlassIconButton extends StatelessWidget {
-  final IconData icon;
-  final VoidCallback? onPressed;
-  final Color? iconColor;
-  final double size;
-  final String? tooltip;
-
-  const GlassIconButton({
-    super.key,
-    required this.icon,
-    required this.onPressed,
-    this.iconColor,
-    this.size = 42,
-    this.tooltip,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final color = iconColor ??
-        (isGlassTheme(context)
-            ? GlassColors.textSecondary
-            : Theme.of(context).iconTheme.color);
-    if (!isGlassTheme(context)) {
-      return IconButton(
-        icon: Icon(icon, color: color),
-        onPressed: onPressed,
-        tooltip: tooltip,
-      );
-    }
-    return GestureDetector(
-      onTap: onPressed,
-      child: Container(
-        width: size,
-        height: size,
-        decoration: BoxDecoration(
-          color: GlassColors.level1,
-          borderRadius: BorderRadius.circular(size / 2),
-          border: Border.all(color: GlassColors.border, width: 1),
-        ),
-        child: Icon(icon, color: color, size: size * 0.5),
-      ),
-    );
-  }
-}
-
-/// Glass-themed switch row compatible with Material [SwitchListTile]
-/// semantics. Non-Glass renders a standard [SwitchListTile].
-class GlassSwitch extends StatelessWidget {
-  final String title;
-  final String? subtitle;
-  final bool value;
-  final ValueChanged<bool> onChanged;
-  final IconData icon;
-
-  const GlassSwitch({
-    super.key,
-    required this.title,
-    required this.value,
-    required this.onChanged,
-    this.subtitle,
-    this.icon = Icons.toggle_on_outlined,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    if (!isGlassTheme(context)) {
-      return SwitchListTile.adaptive(
-        title: Text(title),
-        subtitle: subtitle != null ? Text(subtitle!) : null,
-        value: value,
-        onChanged: onChanged,
-        secondary: Icon(icon),
-      );
-    }
-    return ListTile(
-      title: Text(title),
-      subtitle: subtitle != null ? Text(subtitle!) : null,
-      leading: Icon(icon, color: GlassColors.textSecondary),
-      trailing: Switch(
-        value: value,
-        onChanged: onChanged,
-      ),
-      tileColor: Colors.transparent,
-    );
-  }
-}
-
 /// Glass-themed input field. Non-Glass renders a standard [TextField] with
 /// the same decoration.
 class GlassInput extends StatelessWidget {
@@ -381,29 +260,6 @@ class GlassInput extends StatelessWidget {
         prefixIcon: prefixIcon != null ? Icon(prefixIcon) : null,
         suffixIcon: suffixIcon != null ? Icon(suffixIcon) : null,
       ),
-    );
-  }
-}
-
-/// Glass-themed chip. Non-Glass renders a standard [Chip] / [FilterChip].
-class GlassChip extends StatelessWidget {
-  final String label;
-  final bool selected;
-  final ValueChanged<bool> onSelected;
-
-  const GlassChip({
-    super.key,
-    required this.label,
-    required this.selected,
-    required this.onSelected,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return FilterChip(
-      label: Text(label),
-      selected: selected,
-      onSelected: onSelected,
     );
   }
 }

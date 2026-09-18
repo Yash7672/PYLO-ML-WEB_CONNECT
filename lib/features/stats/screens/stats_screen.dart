@@ -23,6 +23,10 @@ class StatsScreen extends ConsumerWidget {
       return (completed: completed, total: total);
     }));
     final streakStats = ref.watch(overallStatsProvider);
+    // 'Active Streaks' must be habits currently on a streak, not the raw habit
+    // count that overallStats' totalStreaks exposes.
+    final activeStreaks =
+        ref.watch(streakSummaryProvider.select((s) => s['activeStreaks'] ?? 0));
     final minutesToday =
         ref.watch(focusProvider.select((s) => s.minutesToday));
     final sessionCount =
@@ -61,7 +65,7 @@ class StatsScreen extends ConsumerWidget {
           ),
           const SizedBox(height: 12),
           _statCard(context, Icons.local_fire_department, Colors.deepOrange,
-              'Active Streaks', '${streakStats['totalStreaks']}'),
+              'Active Streaks', '$activeStreaks'),
           _statCard(context, Icons.emoji_events_outlined, Colors.amber,
               'Best Streak Ever', '${streakStats['bestStreakEver']} days'),
           _statCard(context, Icons.show_chart, Colors.teal,
@@ -93,12 +97,12 @@ class StatsScreen extends ConsumerWidget {
     return Card(
       margin: const EdgeInsets.only(bottom: 10),
       child: ListTile(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        shape: const RoundedRectangleBorder(borderRadius: BorderRadius.all(Radius.circular(16))),
         leading: Container(
           padding: const EdgeInsets.all(8),
           decoration: BoxDecoration(
             color: color.withValues(alpha: 0.13),
-            borderRadius: BorderRadius.circular(10),
+            borderRadius: const BorderRadius.all(Radius.circular(10)),
           ),
           child: Icon(icon, color: color, size: 22),
         ),

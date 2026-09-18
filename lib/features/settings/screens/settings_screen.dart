@@ -238,10 +238,11 @@ class SettingsScreen extends ConsumerWidget {
                         );
                         if (!ok) {
                           if (!context.mounted) return;
-                          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-                              content: Text(
-                                  'Could not schedule the reminder — notifications may be disabled.'),
-                              backgroundColor: Colors.orange));
+                          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                              content: const Text(
+                                  'Could not schedule the reminder — notifications may be disabled.',
+                                  style: TextStyle(color: Colors.white)),
+                              backgroundColor: Colors.orange.shade900));
                           return;
                         }
                       }
@@ -587,9 +588,10 @@ class SettingsScreen extends ConsumerWidget {
           break;
         }
         if (!context.mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-            content: Text('PINs did not match. Try again.'),
-            backgroundColor: Colors.orange));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: const Text('PINs did not match. Try again.',
+                style: TextStyle(color: Colors.white)),
+            backgroundColor: Colors.orange.shade900));
       }
       await ref.read(securityProvider.notifier).enableAppLock(newPin);
       if (context.mounted) {
@@ -618,9 +620,10 @@ class SettingsScreen extends ConsumerWidget {
             // Recovery accepted: skip the PIN check and remove the lock.
             break;
           }
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-              content: Text('Current PIN was incorrect'),
-              backgroundColor: Colors.red));
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+              content: const Text('Current PIN was incorrect',
+                  style: TextStyle(color: Colors.white)),
+              backgroundColor: Colors.red.shade800));
         }
       }
       await ref.read(securityProvider.notifier).disableAppLock();
@@ -672,15 +675,26 @@ class SettingsScreen extends ConsumerWidget {
           if (recover != true) return;
           break;
         }
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-            content: Text('PIN was incorrect — Face ID kept'),
-            backgroundColor: Colors.red));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: const Text('PIN was incorrect — Face ID kept',
+                style: TextStyle(color: Colors.white)),
+            backgroundColor: Colors.red.shade800));
       }
     }
 
-    await FaceTemplateStore.delete();
-    await ref.read(securityProvider.notifier).setFaceIdEnabled(false);
-    await ref.read(securityProvider.notifier).refreshFaceTemplateStatus();
+    try {
+      await FaceTemplateStore.delete();
+      await ref.read(securityProvider.notifier).setFaceIdEnabled(false);
+      await ref.read(securityProvider.notifier).refreshFaceTemplateStatus();
+    } catch (e) {
+      debugPrint('Error removing Face ID: $e');
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: const Text('Could not remove Face ID',
+              style: TextStyle(color: Colors.white)),
+          backgroundColor: Colors.red.shade800));
+      return;
+    }
     if (!context.mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Face ID removed')));
@@ -713,9 +727,10 @@ class SettingsScreen extends ConsumerWidget {
           oldPin = null; // fall through to fresh-PIN setup below.
           break;
         }
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-            content: Text('Current PIN is incorrect. Try again.'),
-            backgroundColor: Colors.red));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: const Text('Current PIN is incorrect. Try again.',
+                style: TextStyle(color: Colors.white)),
+            backgroundColor: Colors.red.shade800));
       }
     }
 
@@ -729,10 +744,11 @@ class SettingsScreen extends ConsumerWidget {
       if (first == null) return;
       if (oldPin != null && first == oldPin) {
         if (context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-              content:
-                  Text('New PIN must be different from the current one'),
-              backgroundColor: Colors.orange));
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+              content: const Text(
+                  'New PIN must be different from the current one',
+                  style: TextStyle(color: Colors.white)),
+              backgroundColor: Colors.orange.shade900));
         }
         continue;
       }
@@ -741,9 +757,10 @@ class SettingsScreen extends ConsumerWidget {
       if (confirm == null) return;
       if (confirm != first) {
         if (context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-              content: Text('PINs did not match. Try again.'),
-              backgroundColor: Colors.orange));
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+              content: const Text('PINs did not match. Try again.',
+                  style: TextStyle(color: Colors.white)),
+              backgroundColor: Colors.orange.shade900));
         }
         continue;
       }
@@ -765,19 +782,21 @@ class SettingsScreen extends ConsumerWidget {
     if (!context.mounted) return;
     switch (result) {
       case 'ok':
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-            content: Text('PIN updated'),
-            backgroundColor: Colors.green));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: const Text('PIN updated', style: TextStyle(color: Colors.white)),
+            backgroundColor: Colors.green.shade800));
         break;
       case 'wrong_pin':
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-            content: Text('Current PIN was incorrect'),
-            backgroundColor: Colors.red));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: const Text('Current PIN was incorrect',
+                style: TextStyle(color: Colors.white)),
+            backgroundColor: Colors.red.shade800));
         break;
       default:
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-            content: Text('Could not update PIN — secure storage error'),
-            backgroundColor: Colors.red));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: const Text('Could not update PIN — secure storage error',
+                style: TextStyle(color: Colors.white)),
+            backgroundColor: Colors.red.shade800));
     }
   }
 

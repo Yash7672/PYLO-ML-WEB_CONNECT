@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../../core/utils/undo_snackbar.dart';
 import '../../../core/widgets/dialog_disposer.dart';
 import '../../../core/widgets/glass_components.dart';
 import '../../../models/habit_log_item.dart';
@@ -72,8 +73,9 @@ class _HabitCompleteSheetState extends ConsumerState<_HabitCompleteSheet> {
     if (updated != null) {
       messenger.showSnackBar(
         SnackBar(
-          content: Text(_milestoneMessage(updated.currentStreak)),
-          backgroundColor: Colors.green,
+          content: Text(_milestoneMessage(updated.currentStreak),
+              style: const TextStyle(color: Colors.white)),
+          backgroundColor: Colors.green.shade800,
         ),
       );
     }
@@ -142,11 +144,25 @@ class _HabitCompleteSheetState extends ConsumerState<_HabitCompleteSheet> {
           .catchError((Object e) => debugPrint('Error adding item: $e'));
     }
 
-    void deleteItemAndSync(HabitLogItem item) {
-      notifier
-          .deleteItem(item)
-          .then((_) => _syncSnapshot())
-          .catchError((Object e) => debugPrint('Error deleting item: $e'));
+    Future<void> deleteItemAndSync(HabitLogItem item) async {
+      final messenger = ScaffoldMessenger.of(context);
+      try {
+        final row = await notifier.deleteItemForUndo(item);
+        if (row == null) return;
+        await _syncSnapshot();
+        if (!mounted) return;
+        showDeleteUndoSnackBar<Map<String, dynamic>>(
+          messenger,
+          message: 'Entry deleted',
+          backup: row,
+          onUndo: (kept) {
+            notifier.restoreItem(kept);
+            _syncSnapshot();
+          },
+        );
+      } catch (e) {
+        debugPrint('Error deleting item: $e');
+      }
     }
 
     return Padding(
@@ -189,12 +205,12 @@ class _HabitCompleteSheetState extends ConsumerState<_HabitCompleteSheet> {
                   child: TextField(
                     controller: _controller,
                     textCapitalization: TextCapitalization.sentences,
-                    decoration: InputDecoration(
+                    decoration: const InputDecoration(
                       hintText: 'e.g. Legs day, Chest, 5km run',
-                      prefixIcon: const Icon(Icons.add_task_rounded),
+                      prefixIcon: Icon(Icons.add_task_rounded),
                       isDense: true,
                       border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(14)),
+                          borderRadius: BorderRadius.all(Radius.circular(14))),
                     ),
                     onSubmitted: (value) {
                       addItemAndSync(value);
@@ -217,7 +233,7 @@ class _HabitCompleteSheetState extends ConsumerState<_HabitCompleteSheet> {
             if (items.isEmpty)
               Padding(
                 padding: const EdgeInsets.symmetric(vertical: 10),
-                child:                Text(
+                child: Text(
                   'No entries yet. Add what you completed — or just hit Complete.',
                   style: TextStyle(
                       color: isGlassTheme(context)
@@ -239,7 +255,7 @@ class _HabitCompleteSheetState extends ConsumerState<_HabitCompleteSheet> {
                         elevation: 0,
                         margin: const EdgeInsets.only(bottom: 6),
                         shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
+                          borderRadius: const BorderRadius.all(Radius.circular(12)),
                           side: BorderSide(
                               color: isGlassTheme(context)
                                   ? GlassColors.borderMedium
@@ -298,8 +314,8 @@ class _HabitCompleteSheetState extends ConsumerState<_HabitCompleteSheet> {
                           ? GlassColors.textMuted
                           : Colors.grey.shade800)
                       : Colors.white,
-                  shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(14)),
+                  shape: const RoundedRectangleBorder(
+                      borderRadius: BorderRadius.all(Radius.circular(14))),
                 ),
               ),
             ),

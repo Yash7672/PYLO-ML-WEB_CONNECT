@@ -173,6 +173,10 @@ class _AppLockGateState extends ConsumerState<AppLockGate>
 
     if (security.isLoading) {
       return const Scaffold(
+        // Black backdrop (not the theme's scaffold color): the persisted
+        // theme has not loaded yet on this first frame, so a Dark/AMOLED/Glass
+        // user must not see a white flash.
+        backgroundColor: Colors.black,
         body: Center(
           child: Column(
             mainAxisSize: MainAxisSize.min,

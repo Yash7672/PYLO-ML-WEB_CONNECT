@@ -1,5 +1,4 @@
 import 'package:flutter/foundation.dart';
-import 'package:google_mlkit_commons/google_mlkit_commons.dart' show InputImage;
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
 
 /// Thin wrapper around the ML Kit face detector.

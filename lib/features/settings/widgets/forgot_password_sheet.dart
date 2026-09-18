@@ -302,7 +302,7 @@ class _ForgotPasswordFlowState extends State<_ForgotPasswordFlow> {
                 const SizedBox(height: 12),
                 Text(
                   '${_kindLabel(_errorKind).$1}:\n$_error',
-                  style: TextStyle(
+                  style: const TextStyle(
                       color: Colors.redAccent,
                       fontSize: 13,
                       fontWeight: FontWeight.w500),
@@ -318,11 +318,14 @@ class _ForgotPasswordFlowState extends State<_ForgotPasswordFlow> {
                             ? _verifyOtp
                             : _setPassword,
                 child: _busy
-                    ? const SizedBox(
+                    ? SizedBox(
                         width: 20,
                         height: 20,
                         child: CircularProgressIndicator(
-                            strokeWidth: 2, color: Colors.white))
+                            strokeWidth: 2,
+                            color: isGlassTheme(context)
+                                ? GlassColors.onAccent
+                                : Theme.of(context).colorScheme.onPrimary))
                     : Text(
                         _step == _FlowStep.email
                             ? 'Send code'
@@ -349,7 +352,7 @@ class _ForgotPasswordFlowState extends State<_ForgotPasswordFlow> {
     case CloudSyncErrorKind.network:
       return ('No internet / cloud server unreachable', Colors.red);
     case CloudSyncErrorKind.notConfigured:
-      return ('Cloud sync not configured', Color(0xFFB26A00));
+      return const ('Cloud sync not configured', Color(0xFFB26A00));
     case CloudSyncErrorKind.server:
       return ('Cloud server error', Colors.deepOrange);
     case CloudSyncErrorKind.invalidCredentials:

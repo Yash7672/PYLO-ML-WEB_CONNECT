@@ -34,13 +34,14 @@ class GlassColors {
   // Opaque surfaces (dialogs, sheets, menus — where translucency would hurt
   // readability or leak whatever is scrolling underneath)
   static const Color surfaceOpaque = Color(0xFF171A2B);
-  static const Color surfaceOpaqueDark = Color(0xF2171A2B);
+  static const Color surfaceOpaqueDark = Color(0xFF171A2B);
 
   // Surface levels — each floats above the previous one.
-  // DARK translucent tints: the higher the level, the more opaque.
-  static const Color level1 = Color(0x8C141828); // background glass  (~55%)
-  static const Color level2 = Color(0xB3181C2E); // standard glass    (~70%)
-  static const Color level3 = Color(0xD71E2338); // floating glass    (~84%)
+  // DARK translucent tints: the higher the level, the more opaque (content
+  // behind a card/sheet is never readable through it).
+  static const Color level1 = Color(0xC9141828); // background glass  (~79%)
+  static const Color level2 = Color(0xE8181C2E); // standard glass    (~91%)
+  static const Color level3 = Color(0xF51E2338); // floating glass    (~96%)
 
   // Control surfaces (pressed/hover states build on the levels above)
   static const Color surface = level1;
@@ -139,8 +140,8 @@ class AppTheme {
         foregroundColor: isDark ? Colors.white : const Color(0xFF1D1B20),
       ),
       cardTheme: CardThemeData(
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(16),
+        shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.all(Radius.circular(16)),
         ),
         elevation: 0,
         color: isDark ? const Color(0xFF1E1E20) : Colors.white,
@@ -148,21 +149,21 @@ class AppTheme {
       ),
       filledButtonTheme: FilledButtonThemeData(
         style: FilledButton.styleFrom(
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(14),
+          shape: const RoundedRectangleBorder(
+            borderRadius: BorderRadius.all(Radius.circular(14)),
           ),
         ),
       ),
       elevatedButtonTheme: ElevatedButtonThemeData(
         style: ElevatedButton.styleFrom(
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(14),
+          shape: const RoundedRectangleBorder(
+            borderRadius: BorderRadius.all(Radius.circular(14)),
           ),
         ),
       ),
-      inputDecorationTheme: InputDecorationTheme(
+      inputDecorationTheme: const InputDecorationTheme(
         border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(14),
+          borderRadius: BorderRadius.all(Radius.circular(14)),
         ),
       ),
       navigationBarTheme: NavigationBarThemeData(
@@ -171,10 +172,10 @@ class AppTheme {
         indicatorColor: colorScheme.primaryContainer,
         labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
       ),
-      snackBarTheme: SnackBarThemeData(
+      snackBarTheme: const SnackBarThemeData(
         behavior: SnackBarBehavior.floating,
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(12),
+          borderRadius: BorderRadius.all(Radius.circular(12)),
         ),
       ),
     );
@@ -240,7 +241,14 @@ class AppTheme {
 
     return baseDark.copyWith(
       scaffoldBackgroundColor: Colors.transparent,
-      canvasColor: Colors.transparent,
+      // ROOT CAUSE FIX for transparent dropdowns: DropdownButton paints its
+      // open menu panel with ThemeData.canvasColor (it has no per-button
+      // background here), which used to be fully transparent — so the page
+      // text behind an open Priority/Category/Repeat menu bled straight
+      // through it. canvasColor must be OPAQUE. The ambient gradient still
+      // shows everywhere else because Scaffold/AppBar/NavigationBar use their
+      // own transparent backgrounds above it.
+      canvasColor: GlassColors.surfaceOpaque,
       colorScheme: scheme,
       iconTheme: const IconThemeData(color: GlassColors.textPrimary),
       primaryIconTheme: const IconThemeData(color: GlassColors.textPrimary),
@@ -266,32 +274,32 @@ class AppTheme {
           fontFamily: 'Inter',
         ),
       ),
-      cardTheme: CardThemeData(
+      cardTheme: const CardThemeData(
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(18),
-          side: const BorderSide(color: GlassColors.border, width: 1),
+          borderRadius: BorderRadius.all(Radius.circular(18)),
+          side: BorderSide(color: GlassColors.border, width: 1),
         ),
         elevation: 2,
         color: GlassColors.level2,
-        shadowColor: const Color(0x33000000),
+        shadowColor: Color(0x33000000),
         surfaceTintColor: Colors.transparent,
-        margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+        margin: EdgeInsets.symmetric(horizontal: 16, vertical: 6),
       ),
-      dialogTheme: DialogThemeData(
+      dialogTheme: const DialogThemeData(
         backgroundColor: GlassColors.surfaceOpaqueDark,
         surfaceTintColor: Colors.transparent,
         iconColor: GlassColors.textSecondary,
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(24),
-          side: const BorderSide(color: GlassColors.borderMedium, width: 1),
+          borderRadius: BorderRadius.all(Radius.circular(24)),
+          side: BorderSide(color: GlassColors.borderMedium, width: 1),
         ),
-        titleTextStyle: const TextStyle(
+        titleTextStyle: TextStyle(
           color: GlassColors.textPrimary,
           fontSize: 20,
           fontWeight: FontWeight.w700,
           fontFamily: 'Inter',
         ),
-        contentTextStyle: const TextStyle(
+        contentTextStyle: TextStyle(
           color: GlassColors.textSecondary,
           fontSize: 15,
           height: 1.4,
@@ -308,23 +316,25 @@ class AppTheme {
           side: BorderSide(color: GlassColors.borderMedium),
         ),
       ),
-      inputDecorationTheme: InputDecorationTheme(
+      inputDecorationTheme: const InputDecorationTheme(
         filled: true,
-        fillColor: GlassColors.level1,
-        labelStyle: const TextStyle(color: GlassColors.textSecondary),
-        hintStyle: const TextStyle(color: GlassColors.textMuted),
+        // Near-opaque fill so typed text stays crisp and the field never lets
+        // scrolled content glyph through while a dropdown is open over it.
+        fillColor: GlassColors.level3,
+        labelStyle: TextStyle(color: GlassColors.textSecondary),
+        hintStyle: TextStyle(color: GlassColors.textMuted),
         prefixIconColor: GlassColors.textSecondary,
         suffixIconColor: GlassColors.textSecondary,
         border: borderOutline,
         enabledBorder: borderOutline,
         focusedBorder: focusedOutline,
         errorBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(14),
-          borderSide: const BorderSide(color: GlassColors.error, width: 1),
+          borderRadius: BorderRadius.all(Radius.circular(14)),
+          borderSide: BorderSide(color: GlassColors.error, width: 1),
         ),
         focusedErrorBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(14),
-          borderSide: const BorderSide(color: GlassColors.error, width: 1.5),
+          borderRadius: BorderRadius.all(Radius.circular(14)),
+          borderSide: BorderSide(color: GlassColors.error, width: 1.5),
         ),
       ),
       textSelectionTheme: const TextSelectionThemeData(
@@ -383,7 +393,7 @@ class AppTheme {
         }),
         checkColor: const WidgetStatePropertyAll(GlassColors.onAccent),
         side: const BorderSide(color: GlassColors.borderStrong, width: 1.5),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(5)),
+        shape: const RoundedRectangleBorder(borderRadius: BorderRadius.all(Radius.circular(5))),
       ),
       radioTheme: RadioThemeData(
         fillColor: WidgetStateProperty.resolveWith((states) {
@@ -417,7 +427,7 @@ class AppTheme {
         }),
         labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
       ),
-      floatingActionButtonTheme: FloatingActionButtonThemeData(
+      floatingActionButtonTheme: const FloatingActionButtonThemeData(
         backgroundColor: GlassColors.accent,
         foregroundColor: GlassColors.onAccent,
         elevation: 4,
@@ -425,7 +435,7 @@ class AppTheme {
         focusElevation: 6,
         highlightElevation: 6,
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(18),
+          borderRadius: BorderRadius.all(Radius.circular(18)),
         ),
       ),
       listTileTheme: const ListTileThemeData(
@@ -439,9 +449,9 @@ class AppTheme {
         tileColor: Colors.transparent,
       ),
       chipTheme: baseDark.chipTheme.copyWith(
-        backgroundColor: GlassColors.level1,
+        backgroundColor: GlassColors.level2,
         side: const BorderSide(color: GlassColors.borderMedium, width: 1),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        shape: const RoundedRectangleBorder(borderRadius: BorderRadius.all(Radius.circular(12))),
         labelStyle: const TextStyle(
             color: GlassColors.textSecondary, fontFamily: 'Inter'),
         selectedColor: GlassColors.accentSubtle,
@@ -449,19 +459,19 @@ class AppTheme {
         secondaryLabelStyle:
             const TextStyle(color: GlassColors.textSecondary, fontFamily: 'Inter'),
       ),
-      popupMenuTheme: PopupMenuThemeData(
+      popupMenuTheme: const PopupMenuThemeData(
         color: GlassColors.surfaceOpaqueDark,
         surfaceTintColor: Colors.transparent,
         position: PopupMenuPosition.under,
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(16),
-          side: const BorderSide(color: GlassColors.borderMedium, width: 1),
+          borderRadius: BorderRadius.all(Radius.circular(16)),
+          side: BorderSide(color: GlassColors.borderMedium, width: 1),
         ),
-        textStyle: const TextStyle(
+        textStyle: TextStyle(
           color: GlassColors.textPrimary,
           fontFamily: 'Inter',
         ),
-        labelTextStyle: const WidgetStatePropertyAll(
+        labelTextStyle: WidgetStatePropertyAll(
           TextStyle(
             color: GlassColors.textPrimary,
             fontFamily: 'Inter',
@@ -471,39 +481,40 @@ class AppTheme {
       dropdownMenuTheme: const DropdownMenuThemeData(
         textStyle: TextStyle(color: GlassColors.textPrimary, fontFamily: 'Inter'),
       ),
-      snackBarTheme: SnackBarThemeData(
+      snackBarTheme: const SnackBarThemeData(
         behavior: SnackBarBehavior.floating,
         backgroundColor: GlassColors.surfaceOpaqueDark,
-        contentTextStyle: const TextStyle(
+        contentTextStyle: TextStyle(
             color: GlassColors.textPrimary, fontFamily: 'Inter'),
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(16),
-          side: const BorderSide(color: GlassColors.borderMedium, width: 1),
+          borderRadius: BorderRadius.all(Radius.circular(16)),
+          side: BorderSide(color: GlassColors.borderMedium, width: 1),
         ),
         actionTextColor: GlassColors.accent,
         closeIconColor: GlassColors.textSecondary,
       ),
-      tooltipTheme: TooltipThemeData(
+      tooltipTheme: const TooltipThemeData(
         decoration: BoxDecoration(
           color: GlassColors.surfaceOpaqueDark,
-          borderRadius: BorderRadius.circular(10),
-          border: Border.all(color: GlassColors.borderMedium),
+          borderRadius: BorderRadius.all(Radius.circular(10)),
+          border: Border.fromBorderSide(
+              BorderSide(color: GlassColors.borderMedium)),
         ),
-        textStyle: const TextStyle(
+        textStyle: TextStyle(
           color: GlassColors.textPrimary,
           fontSize: 13,
           fontFamily: 'Inter',
         ),
-        waitDuration: const Duration(milliseconds: 600),
+        waitDuration: Duration(milliseconds: 600),
       ),
       outlinedButtonTheme: OutlinedButtonThemeData(
         style: OutlinedButton.styleFrom(
           foregroundColor: GlassColors.textPrimary,
-          backgroundColor: GlassColors.level1,
+          backgroundColor: GlassColors.level2,
           side: const BorderSide(color: GlassColors.borderStrong, width: 1),
           padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(14),
+          shape: const RoundedRectangleBorder(
+            borderRadius: BorderRadius.all(Radius.circular(14)),
           ),
         ),
       ),
@@ -515,8 +526,8 @@ class AppTheme {
           disabledForegroundColor: GlassColors.textMuted,
           elevation: 0,
           padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(14),
+          shape: const RoundedRectangleBorder(
+            borderRadius: BorderRadius.all(Radius.circular(14)),
           ),
         ),
       ),
@@ -529,16 +540,16 @@ class AppTheme {
           elevation: 2,
           shadowColor: GlassColors.accentGlow,
           padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(14),
+          shape: const RoundedRectangleBorder(
+            borderRadius: BorderRadius.all(Radius.circular(14)),
           ),
         ),
       ),
       textButtonTheme: TextButtonThemeData(
         style: TextButton.styleFrom(
           foregroundColor: GlassColors.accent,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(14),
+          shape: const RoundedRectangleBorder(
+            borderRadius: BorderRadius.all(Radius.circular(14)),
           ),
         ),
       ),
@@ -551,14 +562,14 @@ class AppTheme {
       timePickerTheme: TimePickerThemeData(
         backgroundColor: GlassColors.surfaceOpaqueDark,
         elevation: 0,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(24),
-          side: const BorderSide(color: GlassColors.borderMedium),
+        shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.all(Radius.circular(24)),
+          side: BorderSide(color: GlassColors.borderMedium),
         ),
         hourMinuteColor: GlassColors.level2,
         hourMinuteTextColor: GlassColors.textPrimary,
-        hourMinuteShape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(14),
+        hourMinuteShape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.all(Radius.circular(14)),
         ),
         // Selected AM/PM becomes a solid amber pill with dark ink so the
         // choice is unmistakable; unselected stays a dark glass surface.
@@ -604,9 +615,9 @@ class AppTheme {
         backgroundColor: GlassColors.surfaceOpaqueDark,
         surfaceTintColor: Colors.transparent,
         elevation: 0,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(24),
-          side: const BorderSide(color: GlassColors.borderMedium),
+        shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.all(Radius.circular(24)),
+          side: BorderSide(color: GlassColors.borderMedium),
         ),
         headerBackgroundColor: GlassColors.level2,
         headerForegroundColor: GlassColors.textPrimary,
@@ -637,9 +648,9 @@ class AppTheme {
           fontWeight: FontWeight.w700,
           fontFamily: 'Inter',
         ),
-        rangePickerShape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(24),
-          side: const BorderSide(color: GlassColors.borderMedium),
+        rangePickerShape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.all(Radius.circular(24)),
+          side: BorderSide(color: GlassColors.borderMedium),
         ),
         dividerColor: GlassColors.border,
         cancelButtonStyle:

@@ -32,7 +32,7 @@ class BirthdayCard extends StatelessWidget {
     return Card(
       margin: const EdgeInsets.only(bottom: 10),
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(18),
+        borderRadius: const BorderRadius.all(Radius.circular(18)),
         side: BorderSide(
           color: isToday || isSoon ? accent.withValues(alpha: 0.5) : Colors.transparent,
           width: 1.5,
@@ -46,7 +46,7 @@ class BirthdayCard extends StatelessWidget {
           height: 52,
           decoration: BoxDecoration(
             color: accent.withValues(alpha: 0.14),
-            borderRadius: BorderRadius.circular(14),
+            borderRadius: const BorderRadius.all(Radius.circular(14)),
           ),
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,

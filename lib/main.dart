@@ -27,10 +27,6 @@ Future<void> main() async {
   StartupBenchmark.reset();
   StartupBenchmark.mark('main_entered');
 
-  // Load the persisted theme BEFORE the first frame so a Dark/AMOLED/Glass
-  // user never gets a white Light-theme flash on cold start.
-  final initialThemeMode = await loadInitialThemeMode();
-
   // Install a global error handler so framework/build errors are captured
   // instead of killing the app silently. Errors are logged in debug; in
   // release they are swallowed but the app keeps running.
@@ -57,14 +53,13 @@ Future<void> main() async {
     databaseFactory = databaseFactoryFfi;
   }
 
-  runApp(
-    ProviderScope(
-      overrides: [
-        initialThemeModeProvider.overrideWith((ref) => initialThemeMode),
-      ],
-      child: const TaskFlowApp(),
-    ),
-  );
+  runApp(const ProviderScope(child: TaskFlowApp()));
+
+  // Apply the persisted theme off the critical path: the first frame renders
+  // the auth splash (drawn on a black backdrop) and `settingsProvider` flips
+  // to the stored Light/Dark/AMOLED/Glass mode the moment preferences resolve,
+  // so cold starts reach the first frame without a white-Light flash.
+  unawaited(loadInitialThemeMode());
 
   StartupBenchmark.mark('run_app_called');
 }
@@ -85,6 +80,7 @@ class _TaskFlowAppState extends ConsumerState<TaskFlowApp>
   StreamSubscription<AlarmInfo>? _alarmSub;
   bool _alarmBeingPresented = false;
   DateTime? _resumedAt;
+  VoidCallback? _remoteDataListener;
 
   @override
   void initState() {
@@ -105,6 +101,12 @@ class _TaskFlowAppState extends ConsumerState<TaskFlowApp>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _alarmSub?.cancel();
+    final listener = _remoteDataListener;
+    if (listener != null) {
+      // `removeListener` is a no-op when the callback was never registered,
+      // so no membership check is needed on the ValueNotifier.
+      ref.read(cloudSyncServiceProvider).remoteDataApplied.removeListener(listener);
+    }
     super.dispose();
   }
 
@@ -300,11 +302,15 @@ class _TaskFlowAppState extends ConsumerState<TaskFlowApp>
 
       // When the pull merges a website completion change into SQLite, reload
       // the providers so the visible UI reflects the new state immediately.
-      service.remoteDataApplied.addListener(() {
+      if (_remoteDataListener != null) {
+        service.remoteDataApplied.removeListener(_remoteDataListener!);
+      }
+      _remoteDataListener = () {
         if (!mounted) return;
         ref.read(taskProvider.notifier).loadTasks();
         ref.read(checklistProvider.notifier).loadChecklists();
-      });
+      };
+      service.remoteDataApplied.addListener(_remoteDataListener!);
     } catch (e) {
       if (kDebugMode) debugPrint('Cloud access init failed: $e');
     }

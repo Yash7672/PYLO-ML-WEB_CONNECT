@@ -1045,6 +1045,64 @@ class DatabaseHelper {
     _database = null;
   }
 
+  /// Reads raw rows from a whitelisted [table]. Used to snapshot rows just
+  /// before a destructive delete so an Undo action can faithfully restore
+  /// them later (original IDs preserved via INSERT OR REPLACE).
+  Future<List<Map<String, dynamic>>> queryRows(
+    String table, {
+    String? where,
+    List<Object?>? whereArgs,
+    String? orderBy,
+  }) async {
+    if (!_knownTables.contains(table)) return const [];
+    final db = await database;
+    return db.query(
+      table,
+      where: where,
+      whereArgs: whereArgs,
+      orderBy: orderBy,
+    );
+  }
+
+  /// Re-inserts [rows] into a whitelisted [table] inside one transaction using
+  /// INSERT OR REPLACE so the original row IDs survive an Undo.
+  Future<void> restoreRows(
+      String table, List<Map<String, dynamic>> rows) async {
+    if (!_knownTables.contains(table) || rows.isEmpty) return;
+    final db = await database;
+    await db.transaction((txn) async {
+      final batch = txn.batch();
+      for (final row in rows) {
+        batch.insert(table, row, conflictAlgorithm: ConflictAlgorithm.replace);
+      }
+      await batch.commit(noResult: true);
+    });
+  }
+
+  /// Sets the category name for a single task. Used to revert the automatic
+  /// task reassignment that ran while a category was deleted.
+  Future<int> setTaskCategory(String taskId, String category) async {
+    final db = await database;
+    return db.update(
+      'tasks',
+      {
+        'category': category,
+        'updatedAt': DateTime.now().millisecondsSinceEpoch,
+      },
+      where: 'id = ?',
+      whereArgs: [taskId],
+    );
+  }
+
+  /// Restores a deleted checklist item (re-insert with its original ID) and
+  /// bumps the owning checklist's updatedAt so it resurfaces at the top.
+  Future<void> restoreChecklistItem(ChecklistItem item) async {
+    final db = await database;
+    await _touchChecklist(item.checklistId);
+    await db.insert('checklist_items', item.toMap(),
+        conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
   static const List<String> _knownTables = [
     'tasks',
     'categories',

@@ -144,6 +144,46 @@ class BirthdayNotifier extends StateNotifier<AsyncValue<List<Birthday>>> {
     }
   }
 
+  /// Deletes a birthday but snapshots its DB row first so an Undo can restore
+  /// it with the original ID.
+  Future<Map<String, dynamic>?> deleteBirthdayForUndo(Birthday birthday) async {
+    try {
+      final rows = await dbHelper.queryRows(
+        'birthdays',
+        where: 'id = ?',
+        whereArgs: [birthday.id],
+      );
+      await deleteBirthday(birthday.id);
+      return rows.isEmpty ? null : rows.first;
+    } catch (e) {
+      debugPrint('Error deleting birthday: $e');
+      return null;
+    }
+  }
+
+  /// Re-inserts a deleted birthday row (original ID preserved) and re-arms its
+  /// reminder notifications when they are enabled.
+  Future<void> restoreBirthday(Map<String, dynamic> row,
+      {bool notificationsEnabled = true}) async {
+    try {
+      await dbHelper.restoreRows('birthdays', [row]);
+      await loadBirthdays();
+      if (notificationsEnabled) {
+        final birthday = Birthday.fromMap(row);
+        await NotificationHelper.scheduleBirthdayReminders(
+          birthdayId: birthday.id,
+          name: birthday.name,
+          nextBirthday: birthday.nextOccurrence(),
+          reminderDaysBefore: birthday.reminderDaysBefore,
+          reminderHour: birthday.reminderHour,
+          reminderMinute: birthday.reminderMinute,
+        );
+      }
+    } catch (e) {
+      debugPrint('Error restoring birthday: $e');
+    }
+  }
+
   /// (Re)schedules reminders for every existing birthday. Called when the
   /// user turns Birthday reminders ON in Settings — without this, birthdays
   /// added while notifications were off would never fire.
