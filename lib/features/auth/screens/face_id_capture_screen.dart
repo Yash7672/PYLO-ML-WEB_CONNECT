@@ -1,14 +1,13 @@
 import 'dart:async';
-import 'dart:typed_data';
 
 import 'package:camera/camera.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../../../services/security/face_detection_service.dart';
 import '../../../services/security/face_embedding_service.dart';
 import '../../../services/security/face_id_config.dart';
 import '../../../services/security/face_id_service.dart';
-import '../../../services/security/face_liveness_checker.dart';
 import '../../../services/security/face_matching_service.dart';
 import '../../../services/security/face_template_store.dart';
 import '../../../theme/app_theme.dart';
@@ -29,66 +28,133 @@ class _FaceIdCaptureScreenState extends State<FaceIdCaptureScreen>
     with WidgetsBindingObserver {
   CameraController? _controller;
   final FaceDetectionService _detector = FaceDetectionService();
-  final FaceLivenessTracker _livenessTracker = FaceLivenessTracker();
   final List<Float32List> _enrollSamples = [];
 
   // Camera state (kept separate from processing state so the preview stays
   // stable while ML runs).
   bool _initializing = true;
   String? _cameraError;
+  bool _cameraPermissionDenied = false;
 
   // ML / processing state.
   bool _processingFrame = false;
   bool _finished = false;
-  String _statusMessage = 'Initializing camera...';
+  bool _disposed = false;
+
+  // Auth/enroll status text, shown in the badge. Updated directly (no streak
+  // debounce) because auth feedback changes slowly: Detecting → Try again.
+  String _statusMessage = 'Preparing Face ID...';
 
   int _failStreak = 0;
   DateTime? _cooldownUntil;
   Timer? _cooldownTicker;
 
+  /// Single-flight guard for [_initCamera]: initState starts the camera and a
+  /// lifecycle-resume (or a "Try again" tap) can land while the first init is
+  /// still awaiting `availableCameras()`/`initialize()`. Without this guard two
+  /// controllers would be created (duplicate camera init) and the survivor
+  /// race is unpredictable.
+  bool _cameraInitInFlight = false;
+
+  /// Auth-only: when this timestamp passes, the screen gives up and pops back
+  /// to the lock screen (PIN/fingerprint fallback) instead of hanging on the
+  /// "Verifying face..." retries. Re-armed on resume so background time never
+  /// counts against the user.
+  DateTime? _authDeadline;
+
+  /// Consecutive ML/pipeline errors (ML Kit throws, inference/storage
+  /// failures). Crosses [FaceIdConfig.maxConsecutiveMlErrors] → the retry loop
+  /// stops and auth shows the hard fallback message. Reset to 0 on any
+  /// genuinely processed frame.
+  int _mlErrorStreak = 0;
+  bool _fatalError = false;
+
   // Session timing + single-flight bookkeeping.
   final Stopwatch _screenSw = Stopwatch()..start();
   bool _firstFrameLogged = false;
+  bool _firstGoodFaceLogged = false;
   bool _loopRunning = false;
+
+  /// Auth-only: brief pause after a failed detection/match before scanning
+  /// resumes (~2 s). Distinct from the post-lockout [_cooldownUntil].
+  DateTime? _retryUntil;
+  Timer? _retryTicker;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _warmMl();
+    // Constructs the ML Kit detector synchronously (first line of [_warmMl])
+    // and warms the interpreter in the background. The detection loop does NOT
+    // wait on this future — the interpreter is only needed for the final
+    // embedding, and it lazy-loads (sharing the startup pre-warm) inside the
+    // verified phase if necessary.
+    unawaited(_warmMl());
     _initCamera();
+    if (widget.mode == FaceIdCaptureMode.authenticate) {
+      _authDeadline = DateTime.now().add(FaceIdConfig.authTimeout);
+    }
   }
 
   /// Preloads the ML runtime off the critical path while the camera spins
-  /// up, so the first capture doesn't pay the interpreter-load cost.
+  /// up, so the first capture doesn't pay the interpreter-load cost. Never
+  /// throws: a failure only means the first attempts retry as usual.
   Future<void> _warmMl() async {
     if (!FaceIdConfig.isSupportedPlatform) return;
-    _detector.detector; // construct the detector once
-    await FaceEmbeddingService.loadContract();
+    try {
+      _detector.detector; // construct the detector once
+      await FaceEmbeddingService.loadContract();
+    } catch (e) {
+      debugPrint('Face ID ML warm-up failed (will retry): $e');
+    }
   }
 
   @override
   void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
+    _disposed = true;
     _finished = true;
+    WidgetsBinding.instance.removeObserver(this);
     _cooldownTicker?.cancel();
-    _detector.dispose();
-    _controller?.dispose();
+    _cooldownTicker = null;
+    _retryTicker?.cancel();
+    _retryTicker = null;
+    // Idempotent teardown: every controller/detector is released exactly once.
+    final camera = _controller;
     _controller = null;
+    try {
+      camera?.dispose();
+    } catch (_) {}
+    try {
+      _detector.dispose();
+    } catch (_) {}
     super.dispose();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (_disposed) return;
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.hidden) {
-      // Release the camera + detector while backgrounded. Frames stop with
-      // the controller so nothing is processed in the background.
-      _controller?.dispose();
-      _controller = null;
+      _releaseCamera();
     } else if (state == AppLifecycleState.resumed) {
+      // Time spent backgrounded must not eat the user's auth window.
+      if (widget.mode == FaceIdCaptureMode.authenticate) {
+        _authDeadline = DateTime.now().add(FaceIdConfig.authTimeout);
+      }
       _initCamera();
     }
+  }
+
+  /// Drops the camera controller immediately (lifecycle pause). The ML Kit
+  /// detector is intentionally kept alive so a resume re-inits only the
+  /// camera, not the whole ML stack.
+  void _releaseCamera() {
+    final camera = _controller;
+    _controller = null;
+    if (camera == null) return;
+    try {
+      camera.dispose();
+    } catch (_) {}
   }
 
   // -----------------------------------------------------------------------
@@ -96,70 +162,98 @@ class _FaceIdCaptureScreenState extends State<FaceIdCaptureScreen>
   // -----------------------------------------------------------------------
 
   Future<void> _initCamera() async {
-    if (_finished) return;
+    if (_disposed || _finished) return;
     // Don't double-init while already trying.
-    if (_controller != null && _controller!.value.isInitialized) return;
-    setState(() {
-      _initializing = true;
-      _cameraError = null;
-    });
-
-    CameraDescription? cam;
+    final existing = _controller;
+    if (existing != null && existing.value.isInitialized) return;
+    // Single-flight: a lifecycle-resume or a "Try again" tap arriving while
+    // this init is still awaiting must not create a SECOND controller.
+    if (_cameraInitInFlight) return;
+    _cameraInitInFlight = true;
     try {
-      final cameras = await availableCameras();
-      cam = cameras.firstWhere(
-        (c) => c.lensDirection == CameraLensDirection.front,
-        orElse: () => cameras.first,
-      );
-    } catch (e) {
       if (!mounted) return;
       setState(() {
-        _initializing = false;
-        _cameraError = 'No camera available';
-        _statusMessage = 'Could not access a camera';
+        _initializing = true;
+        _cameraError = null;
+        _cameraPermissionDenied = false;
       });
-      return;
-    }
 
-    // Low resolution is plenty: the face fills the oval, ML Kit detects at
-    // this size, and the 112×112 probe doesn't need 4K. The smaller frames
-    // make capture + decode + inference much faster with no accuracy loss.
-    final controller =
-        CameraController(cam, ResolutionPreset.low, enableAudio: false);
+      // Cached descriptor: the startup availability check already enumerated
+      // the cameras and cached the front one, so this is instant on the
+      // press→first-face path. Only a failed/recovered attempt re-enumerates.
+      final cam = await FaceIdService.pickFrontCamera();
+      if (cam == null) {
+        // Don't keep a stale descriptor around — the next attempt (manual
+        // "Try again") must re-enumerate rather than spin on a bad device.
+        FaceIdService.invalidateCameraCache();
+        if (!mounted) return;
+        setState(() {
+          _initializing = false;
+          _cameraError = 'No camera available';
+          _statusMessage = 'Could not access a camera';
+        });
+        return;
+      }
 
-    try {
-      await controller.initialize();
-    } on CameraException catch (e) {
-      if (!mounted) {
+      // Medium resolution: the previous low preset (~320×240) was too small for
+      // reliable ML Kit face detection with landmarks + classification, which
+      // made unlock report "no face" on many devices. Medium still keeps the
+      // capture/decode/inference cycle fast for a 112×112 probe.
+      final controller =
+          CameraController(cam, ResolutionPreset.medium, enableAudio: false);
+
+      try {
+        await controller.initialize();
+      } on CameraException catch (e) {
+        if (!mounted || _disposed) {
+          controller.dispose();
+          return;
+        }
+        final denied = e.description?.toLowerCase().contains('denied') == true;
+        setState(() {
+          _initializing = false;
+          _cameraPermissionDenied = denied;
+          _cameraError = denied
+              ? 'Camera permission is required for Face ID.'
+              : 'Could not start the camera';
+          _statusMessage = denied
+              ? 'Allow camera access in your phone\'s settings, then come back'
+              : 'Camera error';
+        });
+        if (!denied) FaceIdService.invalidateCameraCache();
         controller.dispose();
         return;
       }
-      final denied = e.description?.toLowerCase().contains('denied') == true;
+
+      if (!mounted || _finished || _disposed) {
+        controller.dispose();
+        return;
+      }
+      _controller = controller;
+      if (kDebugMode) {
+        debugPrint('FaceDebug: camera=${cam.name} lens=${cam.lensDirection} '
+            'sensorOrientation=${cam.sensorOrientation} '
+            'res=${controller.value.previewSize}');
+      }
+      debugPrint(
+          'FaceID: camera init = ${_screenSw.elapsedMilliseconds}ms');
+      // The auth window starts once the camera is usable, not while the
+      // camera was still spinning up (or waiting on a permission screen).
+      if (widget.mode == FaceIdCaptureMode.authenticate) {
+        _authDeadline = DateTime.now().add(FaceIdConfig.authTimeout);
+      }
       setState(() {
         _initializing = false;
-        _cameraError =
-            denied ? 'Camera permission denied' : 'Could not start the camera';
-        _statusMessage = denied
-            ? 'Allow camera access in your phone\'s settings, then come back'
-            : 'Camera error';
+        if (widget.mode == FaceIdCaptureMode.enroll) {
+          _statusMessage = 'Hold still and look at the camera';
+        } else {
+          _statusMessage = 'Detecting face...';
+        }
       });
-      controller.dispose();
-      return;
+      _startAutoCapture();
+    } finally {
+      _cameraInitInFlight = false;
     }
-
-    if (!mounted || _finished) {
-      controller.dispose();
-      return;
-    }
-    _controller = controller;
-    debugPrint('PyloFaceTiming camera_ready=${_screenSw.elapsedMilliseconds}ms');
-    setState(() {
-      _initializing = false;
-      _statusMessage = widget.mode == FaceIdCaptureMode.enroll
-          ? 'Hold still and look at the camera'
-          : 'Look at the camera to unlock';
-    });
-    _startAutoCapture();
   }
 
   // -----------------------------------------------------------------------
@@ -168,21 +262,43 @@ class _FaceIdCaptureScreenState extends State<FaceIdCaptureScreen>
 
   Future<void> _startAutoCapture() async {
     if (_loopRunning) return;
+    if (_disposed || _finished) return;
     _loopRunning = true;
     try {
-      while (!_finished) {
-        if (_controller == null || !_controller!.value.isInitialized) {
+      // Deliberately NOT awaiting the TFLite model warm-up: detection only
+      // needs the ML Kit detector (already constructed synchronously in
+      // initState), and only the verified pipeline touches the model — which
+      // lazy-loads/shared-loads the warmed interpreter. The camera preview
+      // and continuous detection start the moment the camera is ready.
+      while (!_finished && !_disposed) {
+        if (_fatalError) break;
+
+        // Auth timeout: give up and return to the lock screen (PIN/fingerprint
+        // fallback) rather than hang on a stuck verify/cooldown cycle.
+        if (widget.mode == FaceIdCaptureMode.authenticate &&
+            _authDeadline != null &&
+            DateTime.now().isAfter(_authDeadline!)) {
+          if (kDebugMode) {
+            debugPrint(
+                'PyloFaceTiming unlock_timeout total=${_screenSw.elapsedMilliseconds}ms');
+          }
+          _finish(false);
+          return;
+        }
+
+        final controller = _controller;
+        if (controller == null || !controller.value.isInitialized) {
           await Future.delayed(const Duration(milliseconds: 50));
           continue;
         }
         if (widget.mode == FaceIdCaptureMode.authenticate &&
-            _cooldownUntil != null) {
+            (_retryUntil != null || _cooldownUntil != null)) {
           await Future.delayed(const Duration(milliseconds: 250));
           continue;
         }
         // Single-flight: never queue a second capture while one is in
         // flight. Skip == drop stale frames; the latest frame wins.
-        if (_processingFrame || _controller!.value.isTakingPicture) {
+        if (_processingFrame || controller.value.isTakingPicture) {
           await Future.delayed(const Duration(milliseconds: 40));
           continue;
         }
@@ -207,24 +323,22 @@ class _FaceIdCaptureScreenState extends State<FaceIdCaptureScreen>
 
     _processingFrame = true;
     try {
-      final processing = await _runCapturePipeline(controller);
-      if (_finished || !mounted || processing == null) return;
-
       if (widget.mode == FaceIdCaptureMode.enroll) {
+        final processing = await _runCapturePipeline(controller);
+        if (_finished || !mounted || processing == null) return;
         await _handleEnrollResult(processing);
       } else {
-        _handleAuthResult(processing);
+        await _attemptCaptureAuth(controller);
       }
     } finally {
       _processingFrame = false;
     }
   }
 
-  /// Runs the full ML pipeline on a single capture and returns both the
-  /// processing result (for alignment/embedding) and the optional liveness
-  /// face object. Returns null on transient camera/pipeline failure — the
-  /// loop simply retries on the next tick.
-  Future<_CaptureAndLiveness?> _runCapturePipeline(
+  /// Runs the full ML pipeline on a single capture. Used by enrollment, which
+  /// collects varied-pose samples; auth reuses the same gates + alignment +
+  /// embedding via [_attemptCaptureAuth].
+  Future<FaceProcessingResult?> _runCapturePipeline(
       CameraController controller) async {
     final sw = Stopwatch()..start();
     try {
@@ -239,7 +353,7 @@ class _FaceIdCaptureScreenState extends State<FaceIdCaptureScreen>
         detectorService: _detector,
       );
       debugPrint('PyloFaceTiming cycle=${sw.elapsedMilliseconds}ms');
-      return _CaptureAndLiveness(result);
+      return result;
     } catch (e) {
       debugPrint('Face capture pipeline failed: $e');
       return null;
@@ -247,19 +361,130 @@ class _FaceIdCaptureScreenState extends State<FaceIdCaptureScreen>
   }
 
   // -----------------------------------------------------------------------
+  // Authentication
+  // -----------------------------------------------------------------------
+
+  /// Unlock loop, one capture per tick: run the FULL pipeline (same quality
+  /// gates + alignment + embedding as enrollment) on every frame. As soon as
+  /// an acceptable face is present, the probe is embedded and scored against
+  /// the stored template — unlock on a match. No blink/head-turn state
+  /// machine: continuous detection → verify → unlock (or "Try again").
+  Future<void> _attemptCaptureAuth(CameraController controller) async {
+    final sw = Stopwatch()..start();
+    try {
+      final file = await controller.takePicture();
+      if (_disposed || _finished || !mounted) return;
+      if (!_firstFrameLogged) {
+        _firstFrameLogged = true;
+        debugPrint(
+            'PyloFaceTiming first_frame=${_screenSw.elapsedMilliseconds}ms');
+      }
+
+      final result = await FaceIdService.processCapture(
+        jpegPath: file.path,
+        detectorService: _detector,
+      );
+      debugPrint('PyloFaceTiming pipeline=${sw.elapsedMilliseconds}ms');
+      if (_disposed || _finished || !mounted) return;
+
+      if (!result.success || result.embedding == null) {
+        if (_isPipelineFailure(result.failReason)) {
+          // ML Kit threw or inference failed: this is NOT "no face". After a
+          // few consecutive errors stop retrying and fall back.
+          _bumpMlError();
+          if (_fatalError) return;
+          _scheduleRetry('Camera error — use fingerprint or PIN');
+          return;
+        }
+        // Face absent or the quality gates rejected it: pause ~2 s, then the
+        // loop automatically resumes scanning.
+        _mlErrorStreak = 0;
+        _scheduleRetry('Try again');
+        return;
+      }
+
+      // A usable face is on screen — log first face once, then embed + match.
+      if (!_firstGoodFaceLogged && kDebugMode) {
+        _firstGoodFaceLogged = true;
+        debugPrint('FaceID: first face = ${_screenSw.elapsedMilliseconds}ms');
+      }
+      debugPrint('FaceID: embedding = ${_screenSw.elapsedMilliseconds}ms');
+      _mlErrorStreak = 0;
+
+      final match = await FaceIdService.matchAgainstStoredTemplate(
+          result.embedding!);
+      debugPrint('PyloFaceTiming match=${sw.elapsedMilliseconds}ms');
+      // Score on every failed unlock (debug builds) so a "Face ID keeps
+      // saying no match" report can be diagnosed from a log line.
+      if (!match.matched && kDebugMode) {
+        debugPrint(
+            'PyloFaceTiming auth score=${match.score.toStringAsFixed(3)} '
+            '(threshold ${FaceIdConfig.similarityThreshold})');
+      }
+      if (_disposed || _finished || !mounted) return;
+
+      if (match.matched) {
+        if (kDebugMode) {
+          debugPrint('FaceID: total = ${_screenSw.elapsedMilliseconds}ms');
+        }
+        _finish(true);
+        return;
+      }
+
+      // Only a genuine identity mismatch counts as a failed attempt.
+      _failStreak++;
+      _scheduleCooldown();
+      if (_cooldownUntil == null) {
+        _scheduleRetry('Face not recognized. Try again.');
+      }
+    } catch (e) {
+      debugPrint('Face auth capture failed: $e');
+      _bumpMlError();
+      if (_fatalError) return;
+      _scheduleRetry('Camera error — use fingerprint or PIN');
+    }
+  }
+
+  /// True when a full-pipeline [FaceProcessingResult.failReason] reflects an
+  /// ML/storage failure (retrying is futile) rather than a transient quality
+  /// gate (retrying is the intended behavior).
+  bool _isPipelineFailure(String? reason) {
+    if (reason == null) return false;
+    return reason == 'Model inference failed' ||
+        reason == 'Internal error' ||
+        reason.contains('Camera error');
+  }
+
+  /// Registers one ML/pipeline error; once the consecutive-error ceiling is
+  /// hit the retry loop stops and the fallback message is shown.
+  void _bumpMlError() {
+    _mlErrorStreak++;
+    if (_mlErrorStreak >= FaceIdConfig.maxConsecutiveMlErrors) {
+      if (kDebugMode) {
+        debugPrint(
+            'PyloFaceTiming fatal_ml_error streak=$_mlErrorStreak '
+            'total=${_screenSw.elapsedMilliseconds}ms');
+      }
+      _fatalError = true;
+      if (mounted) {
+        setState(
+            () => _statusMessage = 'Camera error — use fingerprint or PIN');
+      }
+    }
+  }
+
+  // -----------------------------------------------------------------------
   // Enrollment
   // -----------------------------------------------------------------------
 
-  Future<void> _handleEnrollResult(_CaptureAndLiveness data) async {
+  Future<void> _handleEnrollResult(FaceProcessingResult result) async {
     if (!mounted) return;
-    final result = data.result;
     if (!result.success || result.embedding == null) {
       setState(() => _statusMessage = result.failReason ?? 'Try again');
       return;
     }
 
     final embedding = result.embedding!;
-    if (result.face != null) _livenessTracker.feed(result.face!);
 
     final existingScores = <double>[
       for (final s in _enrollSamples)
@@ -303,50 +528,6 @@ class _FaceIdCaptureScreenState extends State<FaceIdCaptureScreen>
     }
   }
 
-  // -----------------------------------------------------------------------
-  // Authentication
-  // -----------------------------------------------------------------------
-
-  void _handleAuthResult(_CaptureAndLiveness data) {
-    if (!mounted) return;
-    final result = data.result;
-    if (!result.success || result.embedding == null) {
-      _failStreak++;
-      _scheduleCooldown();
-      setState(
-          () => _statusMessage = result.failReason ?? 'No match — try again');
-      return;
-    }
-
-    // Feed liveness tracker.
-    if (result.face != null) _livenessTracker.feed(result.face!);
-
-    _scoreAndRoute(result.embedding!);
-  }
-
-  Future<void> _scoreAndRoute(Float32List embedding) async {
-    final sw = Stopwatch()..start();
-    final match = await FaceIdService.matchAgainstStoredTemplate(embedding);
-    debugPrint('PyloFaceTiming match=${sw.elapsedMilliseconds}ms');
-    if (_finished || !mounted) return;
-
-    if (match.matched) {
-      if (FaceIdConfig.requireLivenessForUnlock && !_livenessTracker.verified) {
-        final hint = _livenessTracker.sawBlink
-            ? 'Blink again to prove you are live'
-            : 'Turn your head slightly to prove liveness';
-        setState(() => _statusMessage = hint);
-        return;
-      }
-      _finish(true);
-      return;
-    }
-
-    _failStreak++;
-    _scheduleCooldown();
-    setState(() => _statusMessage = 'No match — try again');
-  }
-
   void _scheduleCooldown() {
     if (!mounted) return;
     if (_failStreak < FaceIdConfig.maxAuthAttempts) return;
@@ -361,11 +542,29 @@ class _FaceIdCaptureScreenState extends State<FaceIdCaptureScreen>
         _cooldownUntil = null;
         _failStreak = 0;
         if (mounted) {
-          setState(() => _statusMessage = 'Look at the camera to unlock');
+          setState(() => _statusMessage = 'Detecting face...');
         }
       } else if (mounted) {
         final sec = _cooldownUntil!.difference(DateTime.now()).inSeconds + 1;
         setState(() => _statusMessage = 'Try again in $sec s');
+      }
+    });
+  }
+
+  /// Pauses the auth scan for ~2 s, shows [message] ("Try again"), then
+  /// automatically resumes detecting. Retrying continues until a match, the
+  /// auth timeout, a fatal ML error, or the user picking fingerprint/PIN.
+  void _scheduleRetry(String message) {
+    if (_fatalError || !mounted || _finished || _disposed) return;
+    if (_retryUntil != null) return;
+    _retryUntil = DateTime.now().add(FaceIdConfig.authRetryInterval);
+    setState(() => _statusMessage = message);
+    _retryTicker?.cancel();
+    _retryTicker = Timer(FaceIdConfig.authRetryInterval, () {
+      _retryUntil = null;
+      _retryTicker = null;
+      if (!_finished && !_disposed && mounted && _cooldownUntil == null) {
+        setState(() => _statusMessage = 'Detecting face...');
       }
     });
   }
@@ -378,6 +577,7 @@ class _FaceIdCaptureScreenState extends State<FaceIdCaptureScreen>
     if (_finished) return;
     _finished = true;
     _cooldownTicker?.cancel();
+    _cooldownTicker = null;
     if (!mounted) return;
     Navigator.of(context).pop(success);
   }
@@ -391,6 +591,10 @@ class _FaceIdCaptureScreenState extends State<FaceIdCaptureScreen>
     final theme = Theme.of(context);
     final camera = _controller;
     final showPreview = camera != null && !_initializing;
+    final isEnroll = widget.mode == FaceIdCaptureMode.enroll;
+    // Liveness dots are gone from unlock — auth is continuous detection →
+    // verify → unlock. Enrollment keeps its sample-progress dots.
+    final dotCount = isEnroll ? FaceIdConfig.minEnrollSamples : 0;
 
     return Scaffold(
       backgroundColor: Colors.black,
@@ -409,6 +613,44 @@ class _FaceIdCaptureScreenState extends State<FaceIdCaptureScreen>
             if (_initializing)
               const Center(
                 child: CircularProgressIndicator(color: Colors.white),
+              ),
+
+            // Camera permission recovery (all modes, but mainly unlock).
+            if (_cameraPermissionDenied)
+              Positioned.fill(
+                child: Container(
+                  color: Colors.black,
+                  padding: const EdgeInsets.symmetric(horizontal: 32),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+const Icon(Icons.no_photography_outlined,
+                          color: Colors.white54, size: 48),
+                      const SizedBox(height: 16),
+                      const Text(
+                        'Camera permission is required for Face ID.',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                            color: Colors.white, fontWeight: FontWeight.w600),
+                      ),
+                      const SizedBox(height: 12),
+                      const Text(
+                        'If the prompt did not appear, enable it manually:\n'
+                        'Settings → Apps → PYLO → Permissions → Camera → Allow',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                            color: Colors.white60,
+                            fontSize: 13,
+                            height: 1.4),
+                      ),
+                      const SizedBox(height: 20),
+                      TextButton(
+                        onPressed: () => _initCamera(),
+                        child: const Text('Try again'),
+                      ),
+                    ],
+                  ),
+                ),
               ),
 
             // Status badge.
@@ -436,39 +678,43 @@ class _FaceIdCaptureScreenState extends State<FaceIdCaptureScreen>
               ),
             ),
 
-            // Enrollment progress dots.
-            if (widget.mode == FaceIdCaptureMode.enroll && showPreview)
-              Positioned(
-                top: 16,
-                left: 0,
-                right: 0,
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: List.generate(
-                    FaceIdConfig.minEnrollSamples,
-                    (i) {
-                      final filled = i < _enrollSamples.length;
-                      return AnimatedContainer(
-                        duration: const Duration(milliseconds: 250),
-                        margin: const EdgeInsets.symmetric(horizontal: 5),
-                        width: filled ? 12 : 8,
-                        height: filled ? 12 : 8,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: filled
-                              ? (PyloGlass.isActive(context)
-                                  ? GlassColors.accent
-                                  : theme.colorScheme.primary)
-                              : Colors.white24,
-                        ),
-                      );
-                    },
-                  ),
-                ),
-              ),
+            // Progress dots — enrollment only now (top, 6 dots, one per captured
+            // sample). Auth is continuous detection → verify → unlock and
+            // shows no liveness dots.
+            Positioned(
+              top: isEnroll ? 16 : null,
+              bottom: isEnroll ? null : MediaQuery.of(context).size.height * 0.18 + 54,
+              left: 0,
+              right: 0,
+              child: showPreview
+                  ? Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: List.generate(dotCount, (i) {
+                        final filled = i < _enrollSamples.length;
+                        return AnimatedContainer(
+                          duration: const Duration(milliseconds: 250),
+                          margin: const EdgeInsets.symmetric(horizontal: 5),
+                          width: filled ? 12 : 8,
+                          height: filled ? 12 : 8,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: filled
+                                ? (PyloGlass.isActive(context)
+                                    ? GlassColors.accent
+                                    : theme.colorScheme.primary)
+                                : Colors.white24,
+                          ),
+                        );
+                      }),
+                    )
+                  : const SizedBox.shrink(),
+            ),
 
-            // Fallback button (auth only).
-            if (widget.mode == FaceIdCaptureMode.authenticate && showPreview)
+            // Fallback button (auth only). Always visible during auth — even
+            // when the camera failed to start — so the user can always drop
+            // back to PIN / fingerprint instead of being stuck on a black
+            // screen with no exit besides the back arrow.
+            if (!isEnroll)
               Positioned(
                 left: 24,
                 right: 24,
@@ -501,13 +747,4 @@ class _FaceIdCaptureScreenState extends State<FaceIdCaptureScreen>
       ),
     );
   }
-}
-
-// ---------------------------------------------------------------------------
-// Small value class to keep pipeline result + liveness together.
-// ---------------------------------------------------------------------------
-
-class _CaptureAndLiveness {
-  final FaceProcessingResult result;
-  const _CaptureAndLiveness(this.result);
 }

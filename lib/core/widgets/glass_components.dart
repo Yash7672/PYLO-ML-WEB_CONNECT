@@ -213,7 +213,13 @@ class GlassButton extends StatelessWidget {
 
 /// Glass-themed input field. Non-Glass renders a standard [TextField] with
 /// the same decoration.
-class GlassInput extends StatelessWidget {
+///
+/// Password fields (obscured) get a PRESS-AND-HOLD visibility toggle in the
+/// suffix: the text is readable only while the eye is held down and re-masks
+/// the instant it is released — there is no persistent reveal state to leak
+/// the password on screen. Set [obscureRevealEnabled] to false on a field
+/// that must stay permanently masked.
+class GlassInput extends StatefulWidget {
   final TextEditingController? controller;
   final String? labelText;
   final String? hintText;
@@ -226,6 +232,7 @@ class GlassInput extends StatelessWidget {
   final TextInputType? keyboardType;
   final FormFieldValidator<String>? validator;
   final ValueChanged<String>? onChanged;
+  final bool obscureRevealEnabled;
 
   const GlassInput({
     super.key,
@@ -241,24 +248,59 @@ class GlassInput extends StatelessWidget {
     this.keyboardType,
     this.validator,
     this.onChanged,
+    this.obscureRevealEnabled = true,
   });
+
+  @override
+  State<GlassInput> createState() => _GlassInputState();
+}
+
+class _GlassInputState extends State<GlassInput> {
+  /// True only while the eye suffix is physically held down.
+  bool _revealing = false;
 
   @override
   Widget build(BuildContext context) {
     return TextFormField(
-      controller: controller,
-      obscureText: obscureText,
-      maxLines: maxLines,
-      keyboardType: keyboardType,
-      onChanged: onChanged,
-      validator: validator,
+      controller: widget.controller,
+      obscureText: widget.obscureText && !_revealing,
+      maxLines: widget.maxLines,
+      keyboardType: widget.keyboardType,
+      onChanged: widget.onChanged,
+      validator: widget.validator,
       decoration: InputDecoration(
-        labelText: labelText,
-        hintText: hintText,
-        errorText: errorText,
-        helperText: helperText,
-        prefixIcon: prefixIcon != null ? Icon(prefixIcon) : null,
-        suffixIcon: suffixIcon != null ? Icon(suffixIcon) : null,
+        labelText: widget.labelText,
+        hintText: widget.hintText,
+        errorText: widget.errorText,
+        helperText: widget.helperText,
+        prefixIcon: widget.prefixIcon != null ? Icon(widget.prefixIcon) : null,
+        suffixIcon: widget.obscureText && widget.obscureRevealEnabled
+            ? _obscureSuffix()
+            : (widget.suffixIcon != null ? Icon(widget.suffixIcon) : null),
+      ),
+    );
+  }
+
+  /// Press-and-hold eye. Raw pointer handling (rather than a GestureDetector)
+  /// so the field's own tap-to-focus recognizer can never steal or drop the
+  /// press: pointer-down reveals, pointer-up/cancel re-masks immediately.
+  Widget _obscureSuffix() {
+    final icon = _revealing
+        ? Icons.visibility_outlined
+        : Icons.visibility_off_outlined;
+    return Listener(
+      behavior: HitTestBehavior.opaque,
+      onPointerDown: (_) => setState(() => _revealing = true),
+      onPointerUp: (_) => setState(() => _revealing = false),
+      onPointerCancel: (_) => setState(() => _revealing = false),
+      child: SizedBox(
+        width: 48,
+        child: Icon(
+          icon,
+          size: 20,
+          semanticLabel:
+              _revealing ? 'Hide password' : 'Hold to show password',
+        ),
       ),
     );
   }

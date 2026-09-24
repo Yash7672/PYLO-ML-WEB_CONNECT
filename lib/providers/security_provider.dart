@@ -1,8 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../services/security/biometric_service.dart';
+import '../services/security/face_embedding_service.dart';
+import '../services/security/face_id_config.dart';
 import '../services/security/face_id_service.dart';
 import '../services/security/face_template_store.dart';
 import '../services/security/pin_service.dart';
@@ -229,9 +233,31 @@ class SecurityNotifier extends StateNotifier<SecurityState> {
           faceIdAvailable: faceIdAvailable,
         );
       }
+      // With a camera confirmed present, warm the Face ID ML runtime (the
+      // MobileFaceNet TFLite interpreter) fully in the background so the first
+      // unlock attempt never sits on a loading spinner. This is a model-only
+      // warm-up — no camera or ML Kit detector is created here, so there is
+      // exactly ONE init site for detector/camera: FaceIdCaptureScreen.
+      if (faceIdAvailable) _warmFaceIdModel();
     } catch (e) {
       debugPrint('Biometric background check failed: $e');
     }
+  }
+
+  /// Loads the shared MobileFaceNet interpreter without blocking the UI or
+  /// creating any detector/camera. [FaceEmbeddingService] shares a single
+  /// in-flight load, so the first unlock lazily reuses this warm-up. Failure
+  /// is harmless — the unlock path simply loads on demand.
+  void _warmFaceIdModel() {
+    unawaited(() async {
+      if (!FaceIdConfig.isSupportedPlatform) return;
+      try {
+        await FaceEmbeddingService.loadContract();
+        if (kDebugMode) debugPrint('PyloFaceTiming faceid_prewarm=ok');
+      } catch (e) {
+        debugPrint('Face ID pre-warm failed (unlock will lazy-load): $e');
+      }
+    }());
   }
 
   /// Re-reads preference-backed fields (e.g. after a backup import) while

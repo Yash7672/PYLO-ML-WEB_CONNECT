@@ -37,7 +37,17 @@ jobs:
         run: flutter pub get
 
       - name: Build Release APK
-        run: flutter build apk --release
+        run: |
+          set -e
+          if [ -z "${SUPABASE_ANON_KEY}" ]; then
+            echo "::error::Refusing to build a release APK: the SUPABASE_ANON_KEY secret is not set. Cloud sync would be shipped disabled. Add the repo secret (the Supabase anon/public key, never a service_role key)."
+            exit 1
+          fi
+          mkdir -p dart_defines
+          printf 'SUPABASE_ANON_KEY=%s\n' "${SUPABASE_ANON_KEY}" > dart_defines/.env.ci
+          flutter build apk --release --dart-define-from-file=dart_defines/.env.ci
+        env:
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
 
       - name: Upload APK
         uses: actions/upload-artifact@v4

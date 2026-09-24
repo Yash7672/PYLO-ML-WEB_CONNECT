@@ -17,7 +17,7 @@ import 'face_template_store.dart';
 class FaceProcessingResult {
   final bool success;
   final String? failReason;
-  final Face? face; // for liveness tracking
+  final Face? face; // detected face for liveness tracking
   final Float32List? embedding; // model output, 192-d
 
   const FaceProcessingResult.noFace()
@@ -41,6 +41,51 @@ class FaceProcessingResult {
   const FaceProcessingResult.ok(this.face, this.embedding)
       : success = true,
         failReason = null;
+}
+
+/// Verdict of the shared capture quality gates. Anything other than
+/// [FaceQuality.ok] explains why the frame must not progress.
+///
+/// Both the cheap unlock-loop detection ([FaceIdService.detectStill]) and the
+/// full pipeline ([FaceIdService.processCapture]) apply these via
+/// [FaceIdService.classifyFace], so enrollment and authentication treat the
+/// exact same photo identically.
+enum FaceQuality {
+  ok,
+  noFace,
+  multipleFaces,
+  tooSmall,
+  badPose,
+  offCenter,
+  noEyes,
+  error,
+}
+
+/// Result of one cheap per-frame detection (the liveness loop). Carries the
+/// ML Kit [Face] for the liveness machine plus the upright image dimensions
+/// that [FaceIdService.classifyFace] used to gate it.
+class FaceDetectOutcome {
+  final FaceQuality quality;
+
+  /// The single detected face — present only when [quality] == [FaceQuality.ok].
+  final Face? face;
+
+  /// Upright (EXIF-baked) capture dimensions, used by the quality gates.
+  final int uprightWidth;
+  final int uprightHeight;
+
+  /// Human-readable hint shown when a frame fails a gate (null otherwise).
+  final String? message;
+
+  const FaceDetectOutcome({
+    required this.quality,
+    this.face,
+    this.uprightWidth = 0,
+    this.uprightHeight = 0,
+    this.message,
+  });
+
+  bool get ok => quality == FaceQuality.ok;
 }
 
 // ---------------------------------------------------------------------------
@@ -205,8 +250,16 @@ class FaceIdService {
       final upright = img.bakeOrientation(decoded);
 
       final inputImage = InputImage.fromFilePath(jpegPath);
-      final faces = await detectorService.detectFromImage(inputImage);
+      final raw = await detectorService.detectFromImageRaw(inputImage);
       debugPrint('PyloFaceTiming detect=${sw.elapsedMilliseconds}ms');
+
+      // An ML Kit exception must NEVER look like "nobody in frame" — it is a
+      // hard camera/analyzer failure the caller can treat as fatal.
+      if (raw.threw) {
+        return const FaceProcessingResult
+            .failure('Camera error — use fingerprint or PIN');
+      }
+      final faces = raw.faces;
 
       if (faces.isEmpty) {
         return const FaceProcessingResult.noFace();
@@ -216,33 +269,19 @@ class FaceIdService {
       }
       final face = faces.first;
 
-      final shortestSide =
-          math.min(upright.width, upright.height).toDouble();
-      final faceShort =
-          math.min(face.boundingBox.width, face.boundingBox.height);
-      if (faceShort < shortestSide * FaceIdConfig.faceMinSizeFraction) {
-        return const FaceProcessingResult
-            .failure('Move closer to the camera');
-      }
-
-      final pitch = face.headEulerAngleX ?? 0.0;
-      final yaw   = face.headEulerAngleY ?? 0.0;
-      final roll  = face.headEulerAngleZ ?? 0.0;
-      if (pitch.abs() > FaceIdConfig.maxHeadPitchDegrees ||
-          yaw.abs() > FaceIdConfig.maxHeadYawDegrees ||
-          roll.abs() > FaceIdConfig.maxHeadRollDegrees) {
-        return const FaceProcessingResult
-            .failure('Look at the camera');
-      }
-
-      final w = upright.width.toDouble();
-      final h = upright.height.toDouble();
-      final cx = face.boundingBox.center.dx / (w / 2) - 1;
-      final cy = face.boundingBox.center.dy / (h / 2) - 1;
-      if (cx.abs() > FaceIdConfig.offCenterToleranceFraction ||
-          cy.abs() > FaceIdConfig.offCenterToleranceFraction) {
-        return const FaceProcessingResult
-            .failure('Position your face inside the frame');
+      // Shared gate — identical to what the unlock loop's cheap detection
+      // applies, so enrollment, unlock gating and final verification all use
+      // the same acceptance criteria.
+      final quality = classifyFace(face, upright.width, upright.height);
+      const failReasons = {
+        FaceQuality.tooSmall: 'Move closer to the camera',
+        FaceQuality.badPose: 'Look at the camera',
+        FaceQuality.offCenter: 'Position your face inside the frame',
+        FaceQuality.noEyes: 'Keep your face straight',
+      };
+      if (quality != FaceQuality.ok) {
+        return FaceProcessingResult.failure(
+            failReasons[quality] ?? 'Try again');
       }
 
       final leftEye  = face.landmarks[FaceLandmarkType.leftEye]?.position;
@@ -285,6 +324,145 @@ class FaceIdService {
       // Privacy: best-effort clean up the temp capture file.
       try { await File(jpegPath).delete(); } catch (_) {}
       debugPrint('PyloFaceTiming pipeline_total=${sw.elapsedMilliseconds}ms');
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Shared quality gates
+  // -------------------------------------------------------------------------
+
+  /// Applies the capture quality gates used by BOTH enrollment samples and the
+  /// final unlock verification, so the two pipelines treat the same photo
+  /// identically. Coordinates are in ML Kit's upright space (the JPEG's EXIF
+  /// orientation, which [processCapture] and [detectStill] both bake first).
+  static FaceQuality classifyFace(
+      Face face, int uprightWidth, int uprightHeight) {
+    final shortestSide =
+        math.min(uprightWidth, uprightHeight).toDouble();
+    final faceShort =
+        math.min(face.boundingBox.width, face.boundingBox.height);
+    if (faceShort < shortestSide * FaceIdConfig.faceMinSizeFraction) {
+      return FaceQuality.tooSmall;
+    }
+
+    final pitch = face.headEulerAngleX ?? 0.0;
+    final yaw   = face.headEulerAngleY ?? 0.0;
+    final roll  = face.headEulerAngleZ ?? 0.0;
+    if (pitch.abs() > FaceIdConfig.maxHeadPitchDegrees ||
+        yaw.abs() > FaceIdConfig.maxHeadYawDegrees ||
+        roll.abs() > FaceIdConfig.maxHeadRollDegrees) {
+      return FaceQuality.badPose;
+    }
+
+    final w = uprightWidth.toDouble();
+    final h = uprightHeight.toDouble();
+    final cx = face.boundingBox.center.dx / (w / 2) - 1;
+    final cy = face.boundingBox.center.dy / (h / 2) - 1;
+    if (cx.abs() > FaceIdConfig.offCenterToleranceFraction ||
+        cy.abs() > FaceIdConfig.offCenterToleranceFraction) {
+      return FaceQuality.offCenter;
+    }
+
+    final leftEye  = face.landmarks[FaceLandmarkType.leftEye]?.position;
+    final rightEye = face.landmarks[FaceLandmarkType.rightEye]?.position;
+    if (leftEye == null || rightEye == null) {
+      return FaceQuality.noEyes;
+    }
+
+    return FaceQuality.ok;
+  }
+
+  /// Cheap per-frame detection used by the unlock loop to feed the liveness
+  /// machine WITHOUT paying the alignment/embedding cost. Reads the JPEG,
+  /// runs ML Kit detection (EXIF already honored by the framework), and
+  /// applies [classifyFace] — the same gates as [processCapture].
+  ///
+  /// The temp capture file is deleted before returning.
+  static Future<FaceDetectOutcome> detectStill({
+    required String jpegPath,
+    required FaceDetectionService detectorService,
+  }) async {
+    try {
+      final bytes = await File(jpegPath).readAsBytes();
+      final decoded = img.decodeImage(bytes);
+      if (decoded == null) {
+        return const FaceDetectOutcome(
+            quality: FaceQuality.error, message: 'Could not read the image');
+      }
+      final upright = img.bakeOrientation(decoded);
+      final exifOrientation = _readExifOrientation(bytes);
+      final inputImage = InputImage.fromFilePath(jpegPath);
+      final raw = await detectorService.detectFromImageRaw(inputImage);
+      final faces = raw.faces;
+      if (raw.threw) {
+        // Never silently turn an ML Kit exception into "no face" — surfacing
+        // it as an error lets the unlock loop stop retrying and fall back to
+        // PIN/fingerprint instead of looping forever.
+        if (kDebugMode) {
+          debugPrint('FaceDebug: detector threw: ${raw.error}');
+        }
+        return const FaceDetectOutcome(
+          quality: FaceQuality.error,
+          message: 'Camera error — use fingerprint or PIN',
+        );
+      }
+      if (faces.isEmpty) {
+        if (kDebugMode) {
+          debugPrint('FaceDebug: camera_image=${upright.width}x${upright.height} '
+              'exif=$exifOrientation faces=0');
+        }
+        return const FaceDetectOutcome(quality: FaceQuality.noFace);
+      }
+      if (faces.length > 1) {
+        if (kDebugMode) {
+          debugPrint('FaceDebug: camera_image=${upright.width}x${upright.height} '
+              'exif=$exifOrientation faces=${faces.length} quality=multiple');
+        }
+        return const FaceDetectOutcome(quality: FaceQuality.multipleFaces);
+      }
+      final face = faces.first;
+      final quality = classifyFace(face, upright.width, upright.height);
+      if (kDebugMode) {
+        debugPrint('FaceDebug: camera_image=${upright.width}x${upright.height} '
+            'exif=$exifOrientation faces=1 bbox=${face.boundingBox} '
+            'yaw=${face.headEulerAngleY ?? 'null'} '
+            'leftEye=${face.leftEyeOpenProbability?.toStringAsFixed(2) ?? 'null'} '
+            'rightEye=${face.rightEyeOpenProbability?.toStringAsFixed(2) ?? 'null'} '
+            'landmarks=${face.landmarks.length} quality=$quality');
+      }
+      return FaceDetectOutcome(
+        quality: quality,
+        face: face,
+        uprightWidth: upright.width,
+        uprightHeight: upright.height,
+        message: switch (quality) {
+          FaceQuality.tooSmall => 'Move closer to the camera',
+          FaceQuality.badPose => 'Look at the camera',
+          FaceQuality.offCenter => 'Move your face inside the oval',
+          FaceQuality.noEyes => 'Keep your face straight',
+          _ => null,
+        },
+      );
+    } catch (e) {
+      debugPrint('Per-frame detection failed: $e');
+      return const FaceDetectOutcome(
+          quality: FaceQuality.error, message: 'Internal error');
+    } finally {
+      // Privacy: best-effort clean up the temp capture file.
+      try { await File(jpegPath).delete(); } catch (_) {}
+    }
+  }
+
+  /// Reads the JPEG EXIF orientation tag (1..8) used by the debug logs to
+  /// confirm ML Kit's image orientation matches the decoded pixels. Returns
+  /// -1 when no EXIF is present or unparseable.
+  static int _readExifOrientation(Uint8List bytes) {
+    try {
+      final exif = img.decodeJpgExif(bytes);
+      if (exif == null) return -1;
+      return exif.getTag(0x0112)?.toInt() ?? -1; // Orientation
+    } catch (_) {
+      return -1;
     }
   }
 
@@ -344,17 +522,45 @@ class FaceIdService {
   // Camera availability
   // -------------------------------------------------------------------------
 
+  /// Process-wide cache of the front camera descriptor. Startup availability
+  /// checks populate it, so pressing Face ID starts the camera WITHOUT
+  /// re-enumerating the device (a real cost on Android) — keeping the
+  /// press→first-face path on camera setup as small as possible.
+  static CameraDescription? _cachedCamera;
+
+  /// Resolves the front camera (falling back to the first available camera).
+  /// Uses the cached descriptor when present; pass `refresh: true` to force a
+  /// re-enumeration. Never throws.
+  static Future<CameraDescription?> pickFrontCamera(
+      {bool refresh = false}) async {
+    if (!FaceIdConfig.isSupportedPlatform) return null;
+    if (!refresh && _cachedCamera != null) return _cachedCamera;
+    try {
+      final cameras = await availableCameras();
+      _cachedCamera = cameras.isEmpty
+          ? null
+          : cameras.firstWhere(
+              (c) => c.lensDirection == CameraLensDirection.front,
+              orElse: () => cameras.first,
+            );
+      return _cachedCamera;
+    } catch (e) {
+      debugPrint('Camera enumeration failed: $e');
+      _cachedCamera = null;
+      return null;
+    }
+  }
+
+  /// Drops the cached descriptor (e.g. after a failed init) so the next
+  /// attempt re-enumerates instead of retrying a known-bad device entry.
+  static void invalidateCameraCache() {
+    _cachedCamera = null;
+  }
+
   /// Returns true when the device has a camera the app can plausibly use
   /// for Face ID (without prompting the user for permission yet).
   static Future<bool> isCameraAvailable() async {
-    if (!FaceIdConfig.isSupportedPlatform) return false;
-    try {
-      final cameras = await availableCameras();
-      return cameras.isNotEmpty;
-    } catch (e) {
-      debugPrint('Camera availability check failed: $e');
-      return false;
-    }
+    return (await pickFrontCamera()) != null;
   }
 
   // -------------------------------------------------------------------------

@@ -1,3 +1,5 @@
+import 'cloud_config_store.dart';
+
 /// Build-time configuration for the optional PYLO cloud sync.
 ///
 /// The Supabase project URL is public and safe to ship. The publishable
@@ -5,11 +7,20 @@
 /// via `--dart-define` so it can never be committed to the repository by
 /// accident.
 ///
+/// This is also the DEFAULT project the app dials when the user has not
+/// connected their own Supabase project (Settings → Web Access is "bring your
+/// own cloud" and always wins when one is stored). A release built without the
+/// define ships fully offline, exactly as before.
+///
 /// Configure it when running/building the app:
 ///
 /// ```
-/// flutter run --dart-define=SUPABASE_ANON_KEY=<publishable_key>
+/// flutter build apk --release --dart-define=SUPABASE_ANON_KEY=<publishable_key>
 /// ```
+///
+/// For local development use the git-ignored define file
+/// `dart_defines/.env.local` (see `build_release_apk.ps1`), which feeds the
+/// same constant via `--dart-define-from-file`.
 class SupabaseConfig {
   SupabaseConfig._();
 
@@ -36,6 +47,15 @@ class SupabaseConfig {
   /// Parsed project URL, or null when the configured string is malformed.
   /// Used by the error-path reachability probe.
   static Uri? get baseUri => Uri.tryParse(url);
+
+  /// The build-time default [CloudConfig] the sync service uses when the user
+  /// hasn't connected their own project yet. Null when the anon key wasn't
+  /// supplied at build time — the app then stays fully offline. The key value
+  /// itself is never surfaced anywhere.
+  static CloudConfig? toCloudConfig() {
+    if (!isConfigured) return null;
+    return const CloudConfig(url: url, anonKey: anonKey);
+  }
 
   /// One-line startup diagnostic of the FINAL URL actually being passed to
   /// Supabase.initialize(). The URL is public; this logs the full value so a

@@ -27,6 +27,11 @@ class FaceEmbeddingService {
   /// Verified tensor contract of the loaded model (null until first load).
   static _ModelContract? _contract;
 
+  /// Single-flight guards so concurrent callers (startup pre-warm + the first
+  /// unlock embedding) share ONE load instead of each building an interpreter.
+  static Future<Interpreter?>? _loadFuture;
+  static Future<_ModelContract?>? _contractFuture;
+
   @visibleForTesting
   static Interpreter? get interpreter => _interpreter;
 
@@ -37,20 +42,38 @@ class FaceEmbeddingService {
   /// Loads the model from the bundled asset, trying fallback keys on failure.
   /// Returns null (never throws) when the asset cannot be located — callers
   /// surface that as "Face ID unavailable".
-  static Future<Interpreter?> _loadInterpreter() async {
-    if (_interpreter != null) return _interpreter;
+  ///
+  /// Concurrent calls share a single in-flight load so the warm-up path and
+  /// the inference path can never build two interpreters.
+  static Future<Interpreter?> _loadInterpreter() {
+    final existing = _interpreter;
+    if (existing != null) return Future.value(existing);
+    final inflight = _loadFuture;
+    if (inflight != null) return inflight;
+    final future =
+        _doLoadInterpreter().whenComplete(() => _loadFuture = null);
+    _loadFuture = future;
+    return future;
+  }
+
+  static Future<Interpreter?> _doLoadInterpreter() async {
     final keys = [
       FaceIdConfig.modelAssetPath,
       ...FaceIdConfig.modelAssetFallbacks,
     ];
     for (final key in keys) {
       try {
+        final sw = Stopwatch()..start();
         final interpreter = await Interpreter.fromAsset(
           key,
           options: InterpreterOptions()
             ..threads = FaceIdConfig.interpreterThreads,
         );
         _interpreter = interpreter;
+        if (kDebugMode) {
+          debugPrint(
+              'PyloFaceTiming model_load=${sw.elapsedMilliseconds}ms key=$key');
+        }
         return interpreter;
       } catch (e) {
         debugPrint('TFLite load failed for "$key": $e');
@@ -68,7 +91,17 @@ class FaceEmbeddingService {
   /// Reads the model's real input/output tensor metadata. Logs only
   /// non-sensitive technical detail (shape + dtype) — never pixel data or
   /// embeddings.
-  static Future<_ModelContract?> _loadContract() async {
+  static Future<_ModelContract?> _loadContract() {
+    final existing = _contract;
+    if (existing != null) return Future.value(existing);
+    final inflight = _contractFuture;
+    if (inflight != null) return inflight;
+    final future = _doLoadContract().whenComplete(() => _contractFuture = null);
+    _contractFuture = future;
+    return future;
+  }
+
+  static Future<_ModelContract?> _doLoadContract() async {
     if (_contract != null) return _contract;
     final interpreter = await _loadInterpreter();
     if (interpreter == null) return null;

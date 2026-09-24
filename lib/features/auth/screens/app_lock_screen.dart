@@ -123,7 +123,7 @@ class _AppLockGateState extends ConsumerState<AppLockGate>
 
   /// Dedicated on-device Face ID path — completely separate from the OS
   /// fingerprint scanner. Pushes the ML camera screen, which returns true
-  /// only after a real embedding match + liveness pass.
+  /// only after a real embedding match passes the 0.85 threshold.
   Future<void> _authenticateWithFaceId() async {
     if (_authenticating) return;
     final notifier = ref.read(securityProvider.notifier);

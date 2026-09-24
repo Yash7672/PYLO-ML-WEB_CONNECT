@@ -11,6 +11,7 @@ import '../../models/task_model.dart';
 import 'cloud_config_store.dart';
 import 'net_probe_io.dart'
     if (dart.library.js) 'net_probe_web.dart' as net_probe;
+import 'supabase_config.dart';
 import 'today_data_serializer.dart';
 
 /// Coarse outcome codes the Settings UI maps to friendly user messages,
@@ -132,7 +133,15 @@ class CloudSyncService {
   /// enough to tell "host unreachable" apart from a momentarily slow link.
   static const Duration _probeTimeout = Duration(seconds: 6);
 
-  bool get isConfigured => _configStore.current?.isConfigured ?? false;
+  /// True when a cloud project is available to back sync: the user's own
+  /// connected project ([CloudConfigStore]) when one is on this device, the
+  /// build-time default ([SupabaseConfig]) in a release built with the anon
+  /// key, or once a client was successfully built for either. False only when
+  /// both are absent — the app runs fully offline.
+  bool get isConfigured =>
+      _initialized ||
+      _configStore.current?.isConfigured == true ||
+      SupabaseConfig.isConfigured;
   bool get isInitialized => _initialized;
 
   bool get isSignedIn {
@@ -154,10 +163,22 @@ class CloudSyncService {
   GoTrueClient get _auth => _clientObject!.auth;
   SupabaseClient get _client => _clientObject!;
 
-  /// Lazily builds the client for the stored project. Idempotent, happens after
-  /// the first frame, and can never throw: no stored project, an unreadable
-  /// value or any platform init error simply leaves the app in full offline
-  /// mode.
+  /// The project the sync service dials, in precedence order:
+  /// 1. the user's own connected Supabase project ([CloudConfigStore]), or
+  /// 2. the build-time default ([SupabaseConfig]) injected via
+  ///    `--dart-define=SUPABASE_ANON_KEY` when the user hasn't connected one.
+  /// Returns null when neither exists — the app stays fully offline and every
+  /// cloud path silently no-ops. Never reveals the anon key.
+  Future<CloudConfig?> _effectiveConfig() async {
+    final stored = await _configStore.load();
+    if (stored != null && stored.isConfigured) return stored;
+    return SupabaseConfig.toCloudConfig();
+  }
+
+  /// Lazily builds the client for the effective project. Idempotent, happens
+  /// after the first frame, and can never throw: no connected project, an
+  /// unreadable secure-storage value or any platform init error simply leaves
+  /// the app in full offline mode.
   Future<void> ensureInitialized() async {
     if (_initialized || _initFailed) return;
     final inFlight = _initCompleter;
@@ -165,7 +186,7 @@ class CloudSyncService {
       await inFlight.future;
       return;
     }
-    final config = await _configStore.load();
+    final config = await _effectiveConfig();
     if (config == null || !config.isConfigured) {
       _initFailed = true;
       if (kDebugMode) {
@@ -318,8 +339,12 @@ class CloudSyncService {
   }
 
   Future<bool> _prepare() async {
-    final config = await _configStore.load();
+    final config = await _effectiveConfig();
     if (config == null || !config.isConfigured) return false;
+    // A previous startup attempt latched "not configured" when the secure-storage
+    // read transiently returned empty; the config clearly exists now, so retry
+    // the client build instead of permanently reporting not-configured.
+    if (_initFailed) _initFailed = false;
     await ensureInitialized();
     return _initialized;
   }
@@ -329,6 +354,31 @@ class CloudSyncService {
         'No Supabase project is connected. Use "Create an account" and enter '
         'your own Project URL and anon/public key to enable cloud backup.',
       );
+
+  /// Reachability pre-check run BEFORE [signUp] / [login] touches the
+  /// Supabase host, so a clearly unreachable project never consumes the
+  /// request (or a credential) and fails fast with a differentiated message:
+  /// no internet, cloud host unreachable, or a TLS/route problem. Only a
+  /// clear probe verdict blocks; an ambiguous or reachable result returns
+  /// null and the real request is the source of truth (the probe is cheap and
+  /// best-effort, so a false negative here must never block a genuine user).
+  Future<CloudSyncResult?> _preflightNetwork() async {
+    final config = await _effectiveConfig();
+    final baseUri = config?.baseUri;
+    if (baseUri == null) return null;
+    final probe = await net_probe
+        .probeHostReachability(baseUri, timeout: _probeTimeout);
+    switch (probe.status) {
+      case net_probe.HostReachability.noInternet:
+      case net_probe.HostReachability.cloudUnreachable:
+        return CloudSyncResult.fail(CloudSyncErrorKind.network, probe.detail);
+      case net_probe.HostReachability.tlsIssue:
+        return CloudSyncResult.fail(CloudSyncErrorKind.server, probe.detail);
+      case net_probe.HostReachability.reachable:
+      case net_probe.HostReachability.unknown:
+        return null; // presumed reachable — let the real call decide.
+    }
+  }
 
   // ── Bring your own cloud (Create Account screen) ──────────────────────
 
@@ -535,6 +585,10 @@ class CloudSyncService {
         'Password must be at least 6 characters.',
       );
     }
+    // Connectivity validation before signUp: fail fast with a differentiated
+    // message and never present credentials to a clearly unreachable host.
+    final probeIssue = await _preflightNetwork();
+    if (probeIssue != null) return probeIssue;
     try {
       final res = await _auth
           .signUp(email: normalized, password: password)
@@ -572,6 +626,11 @@ class CloudSyncService {
         'Enter your password.',
       );
     }
+    // Connectivity validation before signInWithPassword, same rationale as
+    // [signUp]: the config check above already passed, so a here-reachable
+    // host proceeds straight to the request.
+    final probeIssue = await _preflightNetwork();
+    if (probeIssue != null) return probeIssue;
     try {
       final res = await _auth
           .signInWithPassword(email: normalized, password: password)
@@ -1579,7 +1638,7 @@ class CloudSyncService {
   ///  3. Wrong project key / bad project URL get an explicit config message.
   ///  4. Every failure logs the resolved config + raw error for diagnosis.
   Future<CloudSyncResult> _classify(Object e) async {
-    final config = _configStore.current;
+    final config = await _effectiveConfig();
     if (kDebugMode) {
       debugPrint('Cloud sync error | config: ${config?.debugDescription() ?? 'not connected'}');
       debugPrint('Cloud sync error | error: ${e.runtimeType}: $e');

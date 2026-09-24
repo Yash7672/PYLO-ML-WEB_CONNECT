@@ -67,33 +67,56 @@ class CloudConfigStore {
   final FlutterSecureStorage _storage;
 
   CloudConfig? _cached;
-  bool _loaded = false;
+  Future<CloudConfig?>? _loading;
+  bool _loadedOnce = false;
+
+  /// Bumped by [save] / [clear] so an in-flight [load] that already read the
+  /// storage can never clobber `_cached` with a stale (pre-write) value.
+  int _generation = 0;
 
   /// The stored project, or null when the user never connected one.
   CloudConfig? get current => _cached;
 
-  bool get isLoaded => _loaded;
+  /// True once the store has finished reading secure storage at least once.
+  bool get isLoaded => _loadedOnce;
 
-  /// Loads the stored project exactly once (idempotent, never throws). A
-  /// missing or unreadable value simply leaves [current] null — cloud sync
-  /// stays off and startup stays fully offline.
-  Future<CloudConfig?> load() async {
-    if (_loaded) return _cached;
-    _loaded = true;
+  /// Loads the stored project ONCE and (never throws). Single-flight: every
+  /// caller awaits the same read, so a startup that both warms the cache and
+  /// initializes the sync service can never see a stale `null` for a config
+  /// that really is stored. [save] / [clear] bump the generation so an in-flight
+  /// read that already returned cannot overwrite a just-written config.
+  Future<CloudConfig?> load() {
+    if (_cached != null) {
+      _loadedOnce = true;
+      return Future.value(_cached);
+    }
+    return _loading ??= _readFromStorage().then((config) {
+      _loading = null;
+      _loadedOnce = true;
+      return config;
+    });
+  }
+
+  Future<CloudConfig?> _readFromStorage() async {
     try {
+      final generation = _generation;
       final url = await _storage.read(key: _urlKey);
       final key = await _storage.read(key: _anonKeyKey);
+      if (generation != _generation) return _cached;
       _cached =
           (url == null || url.isEmpty || key == null || key.isEmpty)
               ? null
               : CloudConfig(url: url, anonKey: key);
+      return _cached;
     } catch (_) {
-      _cached = null;
+      return _cached;
     }
-    return _cached;
   }
 
   Future<void> save(CloudConfig config) async {
+    // Invalidate any in-flight load BEFORE mutating, so the writes below can
+    // never be overwritten by a read that already captured the old state.
+    _generation++;
     _cached = config;
     try {
       await _storage.write(key: _urlKey, value: config.url.trim());
@@ -101,13 +124,18 @@ class CloudConfigStore {
     } catch (_) {
       // Best-effort: a failed write keeps the last known config in memory.
     }
+    _cached = config;
   }
 
   Future<void> clear() async {
+    // Invalidate any in-flight load first: its read already captured the
+    // pre-clear state and must not repopulate the cache afterwards.
+    _generation++;
     _cached = null;
     try {
       await _storage.delete(key: _urlKey);
       await _storage.delete(key: _anonKeyKey);
     } catch (_) {}
+    _cached = null;
   }
 }

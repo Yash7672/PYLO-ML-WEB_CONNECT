@@ -82,6 +82,24 @@ abstract final class FaceIdConfig {
   /// quickly the next attempt starts after the previous one finishes.
   static const Duration authCaptureGap = Duration(milliseconds: 200);
 
+  /// Maximum time the user is allowed to spend unlocking before the screen
+  /// gives up and returns to the lock screen (which then shows
+  /// PIN/fingerprint). Prevents the detect/retry loop from hanging forever.
+  static const Duration authTimeout = Duration(seconds: 15);
+
+  /// Pause after any failed detection/match before the auth scan resumes
+  /// (~2 s). Gives the user a beat to re-center, keeps the loop from hammering
+  /// the camera, and visibly reads as "Try again" — then re-detection starts
+  /// automatically.
+  static const Duration authRetryInterval = Duration(seconds: 2);
+
+  /// After this many CONSECUTIVE ML/pipeline errors (ML Kit throwing, model
+  /// inference failing, storage errors), auth stops retrying and surfaces a
+  /// hard "camera error — use PIN/fingerprint" state. A single transient
+  /// stumble should never end the session; a genuine ML failure should never
+  /// spin the loop forever. Reset to 0 on every truly processed frame.
+  static const int maxConsecutiveMlErrors = 3;
+
   /// After this many consecutive failed unlock attempts the camera locks out.
   static const int maxAuthAttempts = 5;
 
@@ -117,21 +135,28 @@ abstract final class FaceIdConfig {
   static const double eyeDistanceMultiplier = 2.6;
 
   // -------------------------------------------------------------------------
-  // Liveness (lightweight, NOT bank-grade)
+  // 5-step liveness (lightweight, NOT bank-grade)
   // -------------------------------------------------------------------------
-
-  /// Blink detected when the mean eye-open probability drops across this
-  /// threshold (0..1 from ML Kit).
-  static const double blinkOpenBoundary = 0.5;
-  static const double blinkClosedBoundary = 0.25;
-
-  /// Fallback liveness: this much head-yaw variation (degrees) across
-  /// consecutive frames counts as movement when eye probabilities are absent.
-  static const double fallbackMovementDegrees = 4.0;
-  static const int fallbackMovementFrames = 3;
 
   /// Liveness is required to UNLOCK, never during enrollment.
   static const bool requireLivenessForUnlock = true;
+
+  /// Blink is counted when the mean eye-open probability (0..1 from ML Kit)
+  /// transitions open → closed → open again across accepted faces.
+  static const double blinkOpenBoundary = 0.5;
+  static const double blinkClosedBoundary = 0.25;
+
+  /// After a blink is counted, this long must elapse before another blink
+  /// can be counted, so a single blink can never satisfy two liveness steps.
+  static const Duration blinkCooldown = Duration(milliseconds: 700);
+
+  /// Head-turn steps: yaw must deviate at least this far from center...
+  static const double headTurnDegrees = 8.0;
+
+  /// ...and hold there for this many consecutive accepted faces before the
+  /// step advances. Sustaining the pose kills single-frame noise and rules
+  /// out a face that disappears and reappears between sightings.
+  static const int headTurnStableFrames = 3;
 
   // -------------------------------------------------------------------------
   // Platform

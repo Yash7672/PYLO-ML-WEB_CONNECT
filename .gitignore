@@ -43,3 +43,8 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Local, git-ignored dart-define files (see build_release_apk.ps1)
+# The anon/public Supabase key must never be committed.
+dart_defines/.env.local
+dart_defines/.env.ci

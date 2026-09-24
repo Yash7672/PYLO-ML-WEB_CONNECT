@@ -25,6 +25,7 @@ import '../../../services/home_widget_service.dart';
 import '../../../services/security/face_template_store.dart';
 import '../../../theme/app_theme.dart';
 import '../../categories/screens/manage_categories_screen.dart';
+import '../../auth/screens/face_detect_diagnostic_screen.dart';
 import '../../auth/screens/face_id_capture_screen.dart';
 import '../../profile/screens/profile_screen.dart';
 import '../widgets/web_access_section.dart';
@@ -85,6 +86,20 @@ class SettingsScreen extends ConsumerWidget {
                 if (security.appLockEnabled) ...[
                   const _BiometricTile(),
                   const _FaceIdTile(),
+                  if (kDebugMode)
+                    ListTile(
+                      title: const Text('Face ID Diagnostic (debug)'),
+                      subtitle: const Text(
+                          'Raw camera \u2192 ML Kit test with live boxes'),
+                      trailing: const Icon(Icons.bug_report),
+                      onTap: () {
+                        Navigator.of(context)
+                            .push(MaterialPageRoute(
+                          builder: (_) =>
+                              const FaceDetectDiagnosticScreen(),
+                        ));
+                      },
+                    ),
                   if (security.faceTemplateExists)
                     ListTile(
                       title: const Text('Remove Face ID'),

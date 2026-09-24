@@ -59,6 +59,8 @@ final cloudAuthProvider =
 class CloudAuthNotifier extends StateNotifier<AsyncValue<CloudAuthState>> {
   final CloudSyncService service;
 
+  static final RegExp _emailReg = RegExp(r'^[^\s@]+@[^\s@]+\.[^\s@]+$');
+
   CloudAuthNotifier(this.service) : super(const AsyncValue.loading()) {
     service.authUser.addListener(_syncFromService);
     unawaited(restoreSession());
@@ -91,15 +93,33 @@ class CloudAuthNotifier extends StateNotifier<AsyncValue<CloudAuthState>> {
     String confirmPassword, {
     CloudConfig? cloud,
   }) async {
+    // Every gate runs BEFORE any network call so the server is only ever
+    // touched with input that is locally valid. The service layer re-checks
+    // as a backstop.
     if (password != confirmPassword) {
       return const CloudSyncResult.fail(
         CloudSyncErrorKind.unknown,
         'Passwords do not match.',
       );
     }
+    final normalizedEmail = email.trim().toLowerCase();
+    if (!_emailReg.hasMatch(normalizedEmail)) {
+      return const CloudSyncResult.fail(
+        CloudSyncErrorKind.invalidEmail,
+        'Please enter a valid email address.',
+      );
+    }
+    if (password.isEmpty || password.length < 6) {
+      return const CloudSyncResult.fail(
+        CloudSyncErrorKind.weakPassword,
+        'Password must be at least 6 characters (the Supabase minimum).',
+      );
+    }
     // Offline-only account: the cloud fields were left blank, so nothing is
-    // connected. Account creation succeeds locally WITHOUT any network call and
-    // the app keeps running fully offline — no prompts anywhere else.
+    // connected. This reports an informative success WITHOUT creating any
+    // account anywhere (no local rows, no Supabase user, no persisted
+    // "signed in" state) — the app simply keeps running fully offline. A
+    // real account is only ever created by `service.signUp` on the server.
     if (cloud == null || !cloud.isConfigured) {
       return const CloudSyncResult.ok(
         'Account created in offline mode — all data stays on this device. '
