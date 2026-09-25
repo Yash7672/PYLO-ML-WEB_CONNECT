@@ -5,7 +5,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/utils/alarm_sound_service.dart';
 import '../../../core/utils/backup_helper_native.dart'
-    if (dart.library.js) '../../../core/utils/backup_helper_web.dart' as backup_helper;
+    if (dart.library.js) '../../../core/utils/backup_helper_web.dart'
+    as backup_helper;
 import '../../../core/utils/notification_helper.dart';
 import '../../../core/widgets/dialog_disposer.dart';
 import '../../../core/widgets/glass_components.dart';
@@ -61,7 +62,8 @@ class SettingsScreen extends ConsumerWidget {
                 items: const [
                   DropdownMenuItem(
                       value: AppThemeMode.light, child: Text('Light')),
-                  DropdownMenuItem(value: AppThemeMode.dark, child: Text('Dark')),
+                  DropdownMenuItem(
+                      value: AppThemeMode.dark, child: Text('Dark')),
                   DropdownMenuItem(
                       value: AppThemeMode.amoled, child: Text('AMOLED')),
                   DropdownMenuItem(
@@ -70,7 +72,6 @@ class SettingsScreen extends ConsumerWidget {
               ),
             ),
           ),
-
           _sectionHeader(context, 'Security'),
           Card(
             child: Column(
@@ -93,10 +94,8 @@ class SettingsScreen extends ConsumerWidget {
                           'Raw camera \u2192 ML Kit test with live boxes'),
                       trailing: const Icon(Icons.bug_report),
                       onTap: () {
-                        Navigator.of(context)
-                            .push(MaterialPageRoute(
-                          builder: (_) =>
-                              const FaceDetectDiagnosticScreen(),
+                        Navigator.of(context).push(MaterialPageRoute(
+                          builder: (_) => const FaceDetectDiagnosticScreen(),
                         ));
                       },
                     ),
@@ -127,8 +126,8 @@ class SettingsScreen extends ConsumerWidget {
                         }
                       },
                       items: LockTimeout.values
-                          .map((t) => DropdownMenuItem(
-                              value: t, child: Text(t.label)))
+                          .map((t) =>
+                              DropdownMenuItem(value: t, child: Text(t.label)))
                           .toList(),
                     ),
                   ),
@@ -136,7 +135,6 @@ class SettingsScreen extends ConsumerWidget {
               ],
             ),
           ),
-
           _sectionHeader(context, 'Notifications'),
           Card(
             child: Column(
@@ -153,7 +151,8 @@ class SettingsScreen extends ConsumerWidget {
                           .setNotificationsEnabled(value);
                       changed = true;
                     } catch (e) {
-                      debugPrint('Failed to update notification preference: $e');
+                      debugPrint(
+                          'Failed to update notification preference: $e');
                     }
                     if (!changed) return;
                     if (value) {
@@ -203,17 +202,16 @@ class SettingsScreen extends ConsumerWidget {
                   subtitle: Text(
                     prefs.reminderMinutes.isEmpty
                         ? 'No default reminders'
-                        : prefs.reminderMinutes
-                            .map((m) => '$m min')
-                            .join(', '),
+                        : prefs.reminderMinutes.map((m) => '$m min').join(', '),
                   ),
                   trailing: DropdownButton<String>(
                     value: null,
                     hint: const Text('Edit'),
                     onChanged: (value) {
                       if (value != null) {
-                        final current = List<int>.from(
-                            ref.read(settingsPreferencesProvider).reminderMinutes);
+                        final current = List<int>.from(ref
+                            .read(settingsPreferencesProvider)
+                            .reminderMinutes);
                         final mins = int.tryParse(value) ?? 0;
                         if (mins > 0 && !current.contains(mins)) {
                           current.add(mins);
@@ -241,13 +239,13 @@ class SettingsScreen extends ConsumerWidget {
                 ),
                 SwitchListTile.adaptive(
                   title: const Text('Daily habit reminder'),
-                  subtitle:
-                      const Text('Get a nudge to complete your habits'),
+                  subtitle: const Text('Get a nudge to complete your habits'),
                   value: prefs.dailyReminderEnabled,
                   onChanged: (value) async {
                     if (value) {
                       if (!kIsWeb) {
-                        final ok = await NotificationService.scheduleDailyReminder(
+                        final ok =
+                            await NotificationService.scheduleDailyReminder(
                           hour: prefs.dailyReminderHour,
                           minute: prefs.dailyReminderMinute,
                         );
@@ -304,7 +302,6 @@ class SettingsScreen extends ConsumerWidget {
               ],
             ),
           ),
-
           _sectionHeader(context, 'Alarm'),
           Card(
             child: Column(
@@ -352,8 +349,8 @@ class SettingsScreen extends ConsumerWidget {
                 ),
                 ListTile(
                   title: const Text('Snooze duration'),
-                  subtitle: Text(
-                      '${prefs.alarmSnoozeMinutes} min after snoozing'),
+                  subtitle:
+                      Text('${prefs.alarmSnoozeMinutes} min after snoozing'),
                   trailing: DropdownButton<int>(
                     value: prefs.alarmSnoozeMinutes,
                     onChanged: (value) {
@@ -387,20 +384,18 @@ class SettingsScreen extends ConsumerWidget {
                   },
                 ),
                 const _ExactAlarmAccessTile(),
+                const _FullScreenAccessTile(),
               ],
             ),
           ),
-
           const WebAccessSection(),
-
           _sectionHeader(context, 'Data'),
           Card(
             child: Column(
               children: [
                 ListTile(
                   title: const Text('Add "Today\'s Tasks" widget'),
-                  subtitle:
-                      const Text('Shows today\'s tasks with progress'),
+                  subtitle: const Text('Shows today\'s tasks with progress'),
                   leading: const Icon(Icons.widgets_outlined),
                   onTap: () async {
                     await HomeWidgetService.requestPinWidget();
@@ -412,8 +407,7 @@ class SettingsScreen extends ConsumerWidget {
                 ),
                 ListTile(
                   title: const Text('Add "Habits" widget'),
-                  subtitle:
-                      const Text('Shows habit streaks and progress'),
+                  subtitle: const Text('Shows habit streaks and progress'),
                   leading: const Icon(Icons.local_fire_department_outlined),
                   onTap: () async {
                     await HomeWidgetService.requestPinHabitsWidget();
@@ -425,8 +419,7 @@ class SettingsScreen extends ConsumerWidget {
                 ),
                 ListTile(
                   title: const Text('Add "Progress" widget'),
-                  subtitle:
-                      const Text('Shows today\'s completion progress'),
+                  subtitle: const Text('Shows today\'s completion progress'),
                   leading: const Icon(Icons.pie_chart_outline),
                   onTap: () async {
                     await HomeWidgetService.requestPinProgressWidget();
@@ -438,8 +431,7 @@ class SettingsScreen extends ConsumerWidget {
                 ),
                 ListTile(
                   title: const Text('Add "Quick Add" widget'),
-                  subtitle:
-                      const Text('Tap to quickly add a new task'),
+                  subtitle: const Text('Tap to quickly add a new task'),
                   leading: const Icon(Icons.add_circle_outline),
                   onTap: () async {
                     await HomeWidgetService.requestPinQuickAddWidget();
@@ -451,8 +443,7 @@ class SettingsScreen extends ConsumerWidget {
                 ),
                 ListTile(
                   title: const Text('Add "Focus" widget'),
-                  subtitle:
-                      const Text('Shows focus timer status'),
+                  subtitle: const Text('Shows focus timer status'),
                   leading: const Icon(Icons.timer_outlined),
                   onTap: () async {
                     await HomeWidgetService.requestPinFocusWidget();
@@ -464,8 +455,7 @@ class SettingsScreen extends ConsumerWidget {
                 ),
                 ListTile(
                   title: const Text('Add "Checklist" widget'),
-                  subtitle:
-                      const Text('Shows your quick checklist'),
+                  subtitle: const Text('Shows your quick checklist'),
                   leading: const Icon(Icons.checklist_outlined),
                   onTap: () async {
                     await HomeWidgetService.requestPinChecklistWidget();
@@ -477,8 +467,7 @@ class SettingsScreen extends ConsumerWidget {
                 ),
                 ListTile(
                   title: const Text('Add "Birthdays" widget'),
-                  subtitle:
-                      const Text('Shows upcoming birthdays'),
+                  subtitle: const Text('Shows upcoming birthdays'),
                   leading: const Icon(Icons.cake_outlined),
                   onTap: () async {
                     await HomeWidgetService.requestPinBirthdaysWidget();
@@ -490,7 +479,8 @@ class SettingsScreen extends ConsumerWidget {
                 ),
                 ListTile(
                   title: const Text('Export Backup'),
-                  subtitle: const Text('Save a .pylobackup file anywhere you choose'),
+                  subtitle:
+                      const Text('Save a .pylobackup file anywhere you choose'),
                   leading: const Icon(Icons.backup_outlined),
                   onTap: () => _exportBackup(context, ref),
                 ),
@@ -515,7 +505,6 @@ class SettingsScreen extends ConsumerWidget {
               ],
             ),
           ),
-
           _sectionHeader(context, 'Categories & Profile'),
           Card(
             child: Column(
@@ -541,7 +530,6 @@ class SettingsScreen extends ConsumerWidget {
               ],
             ),
           ),
-
           _sectionHeader(context, 'About'),
           Card(
             child: ListTile(
@@ -550,8 +538,11 @@ class SettingsScreen extends ConsumerWidget {
                   'Offline • Local • Private • Fast\nv2.0.0 — your data never leaves your device.'),
               leading: ClipOval(
                 child: Image.asset('assets/logo.png',
-                    width: 40, height: 40, fit: BoxFit.cover,
-                    cacheWidth: 120, cacheHeight: 120),
+                    width: 40,
+                    height: 40,
+                    fit: BoxFit.cover,
+                    cacheWidth: 120,
+                    cacheHeight: 120),
               ),
             ),
           ),
@@ -611,8 +602,8 @@ class SettingsScreen extends ConsumerWidget {
       }
       await ref.read(securityProvider.notifier).enableAppLock(newPin);
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('App Lock enabled')));
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('App Lock enabled')));
       }
     } else {
       // Require the current PIN before the lock can be removed. Use strict
@@ -624,9 +615,8 @@ class SettingsScreen extends ConsumerWidget {
           if (!context.mounted) return;
           pin = await _promptPin(context, 'Enter current PIN to disable');
           if (pin == null) return;
-          final result = await ref
-              .read(securityProvider.notifier)
-              .verifyPinStrict(pin);
+          final result =
+              await ref.read(securityProvider.notifier).verifyPinStrict(pin);
           if (result == 'ok') break;
           if (!context.mounted) return;
           if (result == 'error') {
@@ -644,8 +634,8 @@ class SettingsScreen extends ConsumerWidget {
       }
       await ref.read(securityProvider.notifier).disableAppLock();
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('App Lock disabled')));
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('App Lock disabled')));
       }
     }
   }
@@ -712,8 +702,8 @@ class SettingsScreen extends ConsumerWidget {
       return;
     }
     if (!context.mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Face ID removed')));
+    ScaffoldMessenger.of(context)
+        .showSnackBar(const SnackBar(content: Text('Face ID removed')));
   }
 
   Future<void> _changePin(BuildContext context, WidgetRef ref) async {
@@ -726,9 +716,8 @@ class SettingsScreen extends ConsumerWidget {
         if (!context.mounted) return;
         final entered = await _promptPin(context, 'Enter current PIN');
         if (entered == null) return;
-        final result = await ref
-            .read(securityProvider.notifier)
-            .verifyPinStrict(entered);
+        final result =
+            await ref.read(securityProvider.notifier).verifyPinStrict(entered);
         if (result == 'ok') {
           oldPin = entered;
           break;
@@ -799,7 +788,8 @@ class SettingsScreen extends ConsumerWidget {
     switch (result) {
       case 'ok':
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: const Text('PIN updated', style: TextStyle(color: Colors.white)),
+            content: const Text('PIN updated',
+                style: TextStyle(color: Colors.white)),
             backgroundColor: Colors.green.shade800));
         break;
       case 'wrong_pin':
@@ -821,9 +811,9 @@ class SettingsScreen extends ConsumerWidget {
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('PIN storage problem'),
-        content: const Text(
-            'The saved PIN could not be read from secure storage. '
-            'You can set a new PIN now — it will replace the old one.'),
+        content:
+            const Text('The saved PIN could not be read from secure storage. '
+                'You can set a new PIN now — it will replace the old one.'),
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(context, false),
@@ -846,34 +836,35 @@ class SettingsScreen extends ConsumerWidget {
         controllers: [controller],
         child: StatefulBuilder(
           builder: (dialogContext, setDialogState) => AlertDialog(
-          title: Text(title),
-          content: TextField(
-            controller: controller,
-            keyboardType: TextInputType.number,
-            obscureText: true,
-            maxLength: 4,
-            autofocus: true,
-            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-            onChanged: (_) =>
-                setDialogState(() => canSave = controller.text.length == 4),
-            decoration: InputDecoration(
-              labelText: 'PIN',
-              helperText: 'Enter 4 digits',
-              errorText: controller.text.isEmpty
-                  ? null
-                  : (canSave ? null : 'PIN must be 4 digits'),
+            title: Text(title),
+            content: TextField(
+              controller: controller,
+              keyboardType: TextInputType.number,
+              obscureText: true,
+              maxLength: 4,
+              autofocus: true,
+              inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+              onChanged: (_) =>
+                  setDialogState(() => canSave = controller.text.length == 4),
+              decoration: InputDecoration(
+                labelText: 'PIN',
+                helperText: 'Enter 4 digits',
+                errorText: controller.text.isEmpty
+                    ? null
+                    : (canSave ? null : 'PIN must be 4 digits'),
+              ),
             ),
-          ),
-          actions: [
-            TextButton(
-                onPressed: () => Navigator.pop(dialogContext),
-                child: const Text('Cancel')),
-            FilledButton(
-              onPressed:
-                  canSave ? () => Navigator.pop(dialogContext, controller.text) : null,
-              child: const Text('Save'),
-            ),
-          ],
+            actions: [
+              TextButton(
+                  onPressed: () => Navigator.pop(dialogContext),
+                  child: const Text('Cancel')),
+              FilledButton(
+                onPressed: canSave
+                    ? () => Navigator.pop(dialogContext, controller.text)
+                    : null,
+                child: const Text('Save'),
+              ),
+            ],
           ),
         ),
       ),
@@ -886,19 +877,19 @@ class SettingsScreen extends ConsumerWidget {
       final result = await BackupService.exportBackup();
       if (!context.mounted) return;
       if (result == null) {
-        ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Export cancelled.')));
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('Export cancelled.')));
         return;
       }
       final messenger = ScaffoldMessenger.of(context);
       await Clipboard.setData(ClipboardData(text: result.path));
       messenger.showSnackBar(SnackBar(
-          content:
-              Text('Backup saved (${result.itemCount} records):\n${result.path}')));
+          content: Text(
+              'Backup saved (${result.itemCount} records):\n${result.path}')));
     } catch (e) {
       if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Export failed: $e')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Export failed: $e')));
     }
   }
 
@@ -907,16 +898,16 @@ class SettingsScreen extends ConsumerWidget {
       final result = await BackupService.exportJson();
       if (!context.mounted) return;
       if (result == null) {
-        ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Export cancelled.')));
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('Export cancelled.')));
         return;
       }
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text('JSON exported (${result.itemCount} records)')));
     } catch (e) {
       if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Export failed: $e')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Export failed: $e')));
     }
   }
 
@@ -944,8 +935,8 @@ class SettingsScreen extends ConsumerWidget {
       final result = await RestoreService.restore(ref);
       if (!context.mounted) return;
       if (result == null) {
-        ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Import cancelled.')));
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('Import cancelled.')));
         return;
       }
 
@@ -977,8 +968,8 @@ class SettingsScreen extends ConsumerWidget {
               'Restored ${result.itemCount} records. All your data is back!')));
     } catch (e) {
       if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Import failed: $e')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Import failed: $e')));
     }
   }
 
@@ -993,14 +984,13 @@ class SettingsScreen extends ConsumerWidget {
       final file = await backup_helper.performBackup();
       if (!context.mounted) return;
       if (file == null) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-            content: Text('No database exists yet.')));
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('No database exists yet.')));
         return;
       }
       final messenger = ScaffoldMessenger.of(context);
       await Clipboard.setData(ClipboardData(text: file));
-      messenger.showSnackBar(
-          SnackBar(content: Text('DB copied to: $file')));
+      messenger.showSnackBar(SnackBar(content: Text('DB copied to: $file')));
     } catch (e) {
       if (!context.mounted) return;
       ScaffoldMessenger.of(context)
@@ -1083,8 +1073,8 @@ class _FaceIdTileState extends ConsumerState<_FaceIdTile> {
     await notifier.setFaceIdEnabled(true);
     await notifier.refreshFaceTemplateStatus();
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Face ID set up')));
+    ScaffoldMessenger.of(context)
+        .showSnackBar(const SnackBar(content: Text('Face ID set up')));
   }
 
   Future<void> _disable() async {
@@ -1093,8 +1083,8 @@ class _FaceIdTileState extends ConsumerState<_FaceIdTile> {
     // The template itself is kept so the user can re-enable instantly;
     // "Remove Face ID" fully deletes it.
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Face ID turned off')));
+    ScaffoldMessenger.of(context)
+        .showSnackBar(const SnackBar(content: Text('Face ID turned off')));
   }
 
   @override
@@ -1140,13 +1130,26 @@ class _ExactAlarmAccessTile extends ConsumerStatefulWidget {
       _ExactAlarmAccessTileState();
 }
 
-class _ExactAlarmAccessTileState extends ConsumerState<_ExactAlarmAccessTile> {
+class _ExactAlarmAccessTileState extends ConsumerState<_ExactAlarmAccessTile>
+    with WidgetsBindingObserver {
   bool? _canScheduleExact;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _refresh();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _refresh();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
   }
 
   Future<void> _refresh() async {
@@ -1180,4 +1183,64 @@ class _ExactAlarmAccessTileState extends ConsumerState<_ExactAlarmAccessTile> {
   }
 }
 
+class _FullScreenAccessTile extends ConsumerStatefulWidget {
+  const _FullScreenAccessTile();
 
+  @override
+  ConsumerState<_FullScreenAccessTile> createState() =>
+      _FullScreenAccessTileState();
+}
+
+class _FullScreenAccessTileState extends ConsumerState<_FullScreenAccessTile>
+    with WidgetsBindingObserver {
+  bool? _canUse;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _refresh();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _refresh();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  Future<void> _refresh() async {
+    final can = await NotificationHelper.canUseFullScreenIntent();
+    if (mounted) setState(() => _canUse = can);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isGlass = isGlassTheme(context);
+    final subtitle = switch (_canUse) {
+      true => 'Allowed — alarms can take over the lock screen',
+      false =>
+        'Restricted — enable alarm access for reliable full-screen alerts',
+      null => 'Checking…',
+    };
+    return ListTile(
+      title: const Text('Full-screen alarm access'),
+      subtitle: Text(subtitle),
+      leading: Icon(
+        _canUse == true
+            ? Icons.verified_outlined
+            : Icons.warning_amber_outlined,
+        color: isGlass ? GlassColors.textMuted : null,
+      ),
+      trailing: const Icon(Icons.chevron_right),
+      onTap: () async {
+        await NotificationHelper.openFullScreenIntentSettings();
+        await _refresh();
+      },
+    );
+  }
+}

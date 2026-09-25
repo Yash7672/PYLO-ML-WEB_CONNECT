@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/utils/notification_helper.dart';
+import '../../../core/utils/task_schedule.dart';
 import '../../../core/widgets/glass_components.dart';
 import '../../../models/task_model.dart';
 import '../../../providers/preferences_provider.dart';
@@ -25,7 +26,7 @@ class _AddEditTaskScreenState extends ConsumerState<AddEditTaskScreen> {
   String _selectedCategory = 'Personal';
   String _selectedPriority = 'Medium';
   String _repeatRule = 'Never';
-  DateTime _dueDate = DateTime.now();
+  DateTime _dueDate = TaskScheduleTimes.newTaskDueDate();
   DateTime? _startTime;
   List<int> _selectedReminders = [];
   List<ChecklistItemData> _checklist = [];
@@ -77,8 +78,8 @@ class _AddEditTaskScreenState extends ConsumerState<AddEditTaskScreen> {
       // was rescheduled (e.g. to Feb 28) silently re-anchors recurrence.
       _repeatMonthday = widget.taskToEdit!.repeatMonthday;
     } else {
-      _selectedReminders = List<int>.from(
-          ref.read(settingsPreferencesProvider).reminderMinutes);
+      _selectedReminders =
+          List<int>.from(ref.read(settingsPreferencesProvider).reminderMinutes);
     }
   }
 
@@ -177,8 +178,10 @@ class _AddEditTaskScreenState extends ConsumerState<AddEditTaskScreen> {
       );
 
       if (widget.taskToEdit != null) {
-        // Cancel both the previously-saved and the newly-selected offsets so
-        // a reminder the user just removed can never keep firing.
+        final updated = await ref.read(taskProvider.notifier).updateTask(task);
+        if (!updated) {
+          throw StateError('Task update did not persist');
+        }
         await NotificationHelper.cancelAllForTask(
           task.id,
           reminderMinutes: [
@@ -186,24 +189,15 @@ class _AddEditTaskScreenState extends ConsumerState<AddEditTaskScreen> {
             ..._selectedReminders,
           ],
         );
-        await ref.read(taskProvider.notifier).updateTask(task);
       } else {
         await ref.read(taskProvider.notifier).addTask(task);
       }
 
-      // Ask for exact-alarm access at the moment a reminder/alarm is actually
-      // being armed (never at plugin init), so the system screen is contextual
-      // instead of a surprise on first launch.
-      if ((hasReminders || (_alarmEnabled && _alarmTime != null)) &&
-          !isEditingCompleted) {
-        await NotificationHelper.requestExactAlarmAccess();
-      }
-
-      // A task that was already completed (e.g. its title/due date being
-      // corrected after completion) must NOT re-arm its reminders.
       if (hasReminders && !isEditingCompleted) {
-        final taskDateTime = _startTime ??
-            DateTime(_dueDate.year, _dueDate.month, _dueDate.day, 9, 0);
+        final taskDateTime = TaskScheduleTimes.eventTime(
+          dueDate: task.dueDate,
+          startTime: task.startTime,
+        );
         await NotificationHelper.scheduleTaskReminders(
           taskId: task.id,
           taskTitle: task.title,
@@ -217,6 +211,10 @@ class _AddEditTaskScreenState extends ConsumerState<AddEditTaskScreen> {
           taskTitle: task.title,
           alarmTime: _alarmTime!,
         );
+      }
+      if ((hasReminders || (_alarmEnabled && _alarmTime != null)) &&
+          !isEditingCompleted) {
+        await NotificationHelper.requestExactAlarmAccess();
       }
 
       if (mounted) {
@@ -240,8 +238,7 @@ class _AddEditTaskScreenState extends ConsumerState<AddEditTaskScreen> {
   Widget build(BuildContext context) {
     final categoriesState = ref.watch(categoriesProvider);
     final categoryNames = categoriesState.maybeWhen(
-      data: (categories) =>
-          categories.map((c) => c.name).toList(),
+      data: (categories) => categories.map((c) => c.name).toList(),
       orElse: () => <String>[],
     );
     final effectiveCategory =
@@ -291,8 +288,8 @@ class _AddEditTaskScreenState extends ConsumerState<AddEditTaskScreen> {
                         isExpanded: true,
                         underline: const SizedBox.shrink(),
                         items: categoryNames
-                            .map(
-                                (c) => DropdownMenuItem(value: c, child: Text(c)))
+                            .map((c) =>
+                                DropdownMenuItem(value: c, child: Text(c)))
                             .toList(),
                         onChanged: (val) {
                           if (val != null) {
@@ -312,8 +309,8 @@ class _AddEditTaskScreenState extends ConsumerState<AddEditTaskScreen> {
                         isExpanded: true,
                         underline: const SizedBox.shrink(),
                         items: _priorities
-                            .map(
-                                (p) => DropdownMenuItem(value: p, child: Text(p)))
+                            .map((p) =>
+                                DropdownMenuItem(value: p, child: Text(p)))
                             .toList(),
                         onChanged: (val) {
                           if (val != null) {
@@ -407,32 +404,38 @@ class _AddEditTaskScreenState extends ConsumerState<AddEditTaskScreen> {
                     style: TextStyle(fontSize: 12)),
                 onTap: () async {
                   final taskDateTime = _startTime ??
-                      DateTime(_dueDate.year, _dueDate.month, _dueDate.day, 9, 0);
-                   final picked = await showTimePicker(
-                     context: context,
-                     initialTime: TimeOfDay.fromDateTime(taskDateTime),
-                   );
-                   if (!mounted) return;
-                    if (picked != null) {
-                     final reminderTime = DateTime(
-                       _dueDate.year, _dueDate.month, _dueDate.day,
-                       picked.hour, picked.minute,
-                     );
-                     final diff = taskDateTime.difference(reminderTime).inMinutes;
-                     if (diff > 0 && !_selectedReminders.contains(diff)) {
-                       setState(() {
-                         _selectedReminders.add(diff);
-                         _selectedReminders.sort();
-                       });
-                       } else if (diff <= 0) {
-                          if (!context.mounted) return;
-ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                         content: const Text('Reminder time must be before the task start time',
-                             style: TextStyle(color: Colors.white)),
-                         backgroundColor: Colors.orange.shade900,
-                       ));
-                     }
-                   }
+                      DateTime(
+                          _dueDate.year, _dueDate.month, _dueDate.day, 9, 0);
+                  final picked = await showTimePicker(
+                    context: context,
+                    initialTime: TimeOfDay.fromDateTime(taskDateTime),
+                  );
+                  if (!mounted) return;
+                  if (picked != null) {
+                    final reminderTime = DateTime(
+                      _dueDate.year,
+                      _dueDate.month,
+                      _dueDate.day,
+                      picked.hour,
+                      picked.minute,
+                    );
+                    final diff =
+                        taskDateTime.difference(reminderTime).inMinutes;
+                    if (diff > 0 && !_selectedReminders.contains(diff)) {
+                      setState(() {
+                        _selectedReminders.add(diff);
+                        _selectedReminders.sort();
+                      });
+                    } else if (diff <= 0) {
+                      if (!context.mounted) return;
+                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                        content: const Text(
+                            'Reminder time must be before the task start time',
+                            style: TextStyle(color: Colors.white)),
+                        backgroundColor: Colors.orange.shade900,
+                      ));
+                    }
+                  }
                 },
               ),
               const SizedBox(height: 12),
@@ -447,8 +450,8 @@ ScaffoldMessenger.of(context).showSnackBar(SnackBar(
                     _alarmEnabled = val;
                     if (val && _alarmTime == null) {
                       final base = _startTime ??
-                          DateTime(
-                              _dueDate.year, _dueDate.month, _dueDate.day, 9, 0);
+                          DateTime(_dueDate.year, _dueDate.month, _dueDate.day,
+                              9, 0);
                       _alarmTime = base;
                     }
                   });
@@ -485,8 +488,7 @@ ScaffoldMessenger.of(context).showSnackBar(SnackBar(
                   },
                 ),
               const SizedBox(height: 12),
-              Text('Checklist',
-                  style: Theme.of(context).textTheme.titleSmall),
+              Text('Checklist', style: Theme.of(context).textTheme.titleSmall),
               const SizedBox(height: 8),
               Row(
                 children: [
@@ -527,8 +529,8 @@ ScaffoldMessenger.of(context).showSnackBar(SnackBar(
                           ),
                         ),
                         onChanged: (val) {
-                          setState(() =>
-                              _checklist[i] = _checklist[i].copyWith(done: val ?? false));
+                          setState(() => _checklist[i] =
+                              _checklist[i].copyWith(done: val ?? false));
                         },
                         secondary: IconButton(
                           icon: const Icon(Icons.close, size: 18),

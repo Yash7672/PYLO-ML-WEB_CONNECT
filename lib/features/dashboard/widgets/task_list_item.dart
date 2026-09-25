@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/constants/app_colors.dart';
@@ -12,9 +14,7 @@ import '../../../theme/app_theme.dart';
 import '../../../utils/extensions.dart';
 
 Color _mutedIcon(BuildContext context) =>
-    isGlassTheme(context)
-        ? GlassColors.textMuted
-        : Colors.grey;
+    isGlassTheme(context) ? GlassColors.textMuted : Colors.grey;
 
 class TaskListItem extends ConsumerWidget {
   final Task task;
@@ -54,7 +54,8 @@ class TaskListItem extends ConsumerWidget {
             final restored =
                 await taskNotifier.restoreTaskFromSnapshot(snapshot);
             if (restored != null && notificationsEnabled) {
-              _scheduleReminderIfNeeded(restored);
+              unawaited(
+                  taskNotifier.scheduleRestoredTaskNotifications(restored));
             }
           },
         );
@@ -62,179 +63,173 @@ class TaskListItem extends ConsumerWidget {
       child: Card(
         margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
         child: Row(
-            children: [
-              Container(
-                width: 5,
-                height: 96,
-                decoration: BoxDecoration(
-                  color: priorityColor,
-                  borderRadius: const BorderRadius.only(
-                      topLeft: Radius.circular(16),
-                      bottomLeft: Radius.circular(16)),
-                ),
+          children: [
+            Container(
+              width: 5,
+              height: 96,
+              decoration: BoxDecoration(
+                color: priorityColor,
+                borderRadius: const BorderRadius.only(
+                    topLeft: Radius.circular(16),
+                    bottomLeft: Radius.circular(16)),
               ),
-              Expanded(
-                child: ListTile(
-                  contentPadding:
-                      const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-                  leading: Transform.scale(
-                    scale: 1.2,
-                    child: Checkbox(
-                      value: task.isCompleted,
-                      shape: const CircleBorder(),
-                      activeColor: theme.colorScheme.primary,
-                      onChanged: (_) => ref
-                          .read(taskProvider.notifier)
-                          .toggleTaskCompletion(
-                            task,
-                            notificationsEnabled: ref
-                                .read(settingsPreferencesProvider)
-                                .notificationsEnabled,
-                          ),
+            ),
+            Expanded(
+              child: ListTile(
+                contentPadding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                leading: Transform.scale(
+                  scale: 1.2,
+                  child: Checkbox(
+                    value: task.isCompleted,
+                    shape: const CircleBorder(),
+                    activeColor: theme.colorScheme.primary,
+                    onChanged: (_) =>
+                        ref.read(taskProvider.notifier).toggleTaskCompletion(
+                              task,
+                              notificationsEnabled: ref
+                                  .read(settingsPreferencesProvider)
+                                  .notificationsEnabled,
+                            ),
+                  ),
+                ),
+                title: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        task.title,
+                        style: theme.textTheme.titleMedium?.copyWith(
+                          decoration: task.isCompleted
+                              ? TextDecoration.lineThrough
+                              : null,
+                          color: task.isCompleted ? _mutedIcon(context) : null,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
                     ),
-                  ),
-                  title: Row(
-                    children: [
-                      Expanded(
+                    if (task.isPinned)
+                      const Icon(Icons.push_pin,
+                          size: 16, color: Colors.orange),
+                    if (task.isFavorite)
+                      const Icon(Icons.star, size: 16, color: Colors.amber),
+                  ],
+                ),
+                subtitle: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (task.description.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 4),
                         child: Text(
-                          task.title,
-                          style: theme.textTheme.titleMedium?.copyWith(
-                            decoration: task.isCompleted
-                                ? TextDecoration.lineThrough
-                                : null,
-                            color: task.isCompleted
-                                    ? _mutedIcon(context)
-                                    : null,
-                            fontWeight: FontWeight.w600,
-                          ),
+                          task.description,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: theme.textTheme.bodySmall?.copyWith(
+                              color: task.isCompleted
+                                  ? glassMutedText(context)
+                                  : glassSecondaryText(context)),
                         ),
                       ),
-                      if (task.isPinned)
-                        const Icon(Icons.push_pin,
-                            size: 16, color: Colors.orange),
-                      if (task.isFavorite)
-                        const Icon(Icons.star, size: 16, color: Colors.amber),
-                    ],
-                  ),
-                  subtitle: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      if (task.description.isNotEmpty)
-                        Padding(
-                          padding: const EdgeInsets.only(top: 4),
+                    const SizedBox(height: 6),
+                    Row(
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 8, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: categoryColor.withValues(alpha: 0.16),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
                           child: Text(
-                            task.description,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: theme.textTheme.bodySmall?.copyWith(
-                                color: task.isCompleted
-                                    ? glassMutedText(context)
-                                    : glassSecondaryText(context)),
+                            task.category,
+                            style: theme.textTheme.labelSmall?.copyWith(
+                                color: categoryColor,
+                                fontWeight: FontWeight.bold),
                           ),
                         ),
-                      const SizedBox(height: 6),
-                      Row(
-                        children: [
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 8, vertical: 2),
-                            decoration: BoxDecoration(
-                              color: categoryColor.withValues(alpha: 0.16),
-                              borderRadius: BorderRadius.circular(8),
-                            ),
-                            child: Text(
-                              task.category,
-                              style: theme.textTheme.labelSmall?.copyWith(
-                                  color: categoryColor,
-                                  fontWeight: FontWeight.bold),
-                            ),
-                          ),
+                        const SizedBox(width: 8),
+                        Icon(Icons.calendar_today,
+                            size: 12, color: glassMutedText(context)),
+                        const SizedBox(width: 4),
+                        Text(task.dueDate.toDisplayString(),
+                            style: theme.textTheme.labelSmall
+                                ?.copyWith(color: glassMutedText(context))),
+                        if (task.alarmEnabled && task.alarmTime != null) ...[
                           const SizedBox(width: 8),
-                          Icon(Icons.calendar_today,
-                              size: 12, color: glassMutedText(context)),
-                          const SizedBox(width: 4),
-                          Text(task.dueDate.toDisplayString(),
-                              style: theme.textTheme.labelSmall
-                                  ?.copyWith(color: glassMutedText(context))),
-                          if (task.alarmEnabled && task.alarmTime != null) ...[
-                            const SizedBox(width: 8),
-                            const Icon(Icons.alarm,
-                                size: 12, color: Colors.deepOrange),
-                            const SizedBox(width: 2),
-                            Text(
-                              _alarmTimeLabel(task.alarmTime!),
-                              style: theme.textTheme.labelSmall
-                                  ?.copyWith(color: Colors.deepOrange),
-                            ),
-                          ],
+                          const Icon(Icons.alarm,
+                              size: 12, color: Colors.deepOrange),
+                          const SizedBox(width: 2),
+                          Text(
+                            _alarmTimeLabel(task.alarmTime!),
+                            style: theme.textTheme.labelSmall
+                                ?.copyWith(color: Colors.deepOrange),
+                          ),
                         ],
-                      ),
-                    ],
-                  ),
-                  trailing: PopupMenuButton<String>(
-                    onSelected: (value) async {
-                      switch (value) {
-                        case 'favorite':
-                          ref.read(taskProvider.notifier).toggleFavorite(task);
-                          break;
-                        case 'pin':
-                          ref.read(taskProvider.notifier).togglePin(task);
-                          break;
-                        case 'archive':
-                          ref.read(taskProvider.notifier).archiveTask(task.id);
-                          break;
-                        case 'restore':
-                          await ref
-                              .read(taskProvider.notifier)
-                              .restoreTaskFromModel(task);
-                          if (ref
-                              .read(settingsPreferencesProvider)
-                              .notificationsEnabled) {
-                            await NotificationHelper.cancelAllForTask(
-                                task.id,
-                                reminderMinutes: task.reminderMinutes);
-                            _scheduleReminderIfNeeded(task);
-                          }
-                          break;
-                        case 'delete':
-                          _confirmPermanentDelete(context, task, ref);
-                          break;
-                        default:
-                          break;
-                      }
-                    },
-                    itemBuilder: (context) {
-                      final items = <PopupMenuEntry<String>>[];
-                      items.add(PopupMenuItem(
-                          value: 'favorite',
-                          child: Text(task.isFavorite
-                              ? 'Remove favorite'
-                              : 'Favorite')));
-                      items.add(PopupMenuItem(
-                          value: 'pin',
-                          child: Text(task.isPinned ? 'Unpin' : 'Pin')));
-                      if (task.isArchived || task.isDeleted) {
-                        items.add(const PopupMenuItem(
-                            value: 'restore', child: Text('Restore')));
-                        items.add(const PopupMenuItem(
-                            value: 'delete',
-                            child: Text('Delete permanently')));
-                      } else {
-                        items.add(const PopupMenuItem(
-                            value: 'archive', child: Text('Archive')));
-                      }
-                      return items;
-                    },
-                  ),
-                  onTap: () {
-                    _showTaskDetails(context, task, ref);
+                      ],
+                    ),
+                  ],
+                ),
+                trailing: PopupMenuButton<String>(
+                  onSelected: (value) async {
+                    switch (value) {
+                      case 'favorite':
+                        ref.read(taskProvider.notifier).toggleFavorite(task);
+                        break;
+                      case 'pin':
+                        ref.read(taskProvider.notifier).togglePin(task);
+                        break;
+                      case 'archive':
+                        ref.read(taskProvider.notifier).archiveTask(task.id);
+                        break;
+                      case 'restore':
+                        await ref
+                            .read(taskProvider.notifier)
+                            .restoreTaskFromModel(task);
+                        if (ref
+                            .read(settingsPreferencesProvider)
+                            .notificationsEnabled) {
+                          await NotificationHelper.cancelAllForTask(task.id,
+                              reminderMinutes: task.reminderMinutes);
+                          _scheduleReminderIfNeeded(task);
+                        }
+                        break;
+                      case 'delete':
+                        _confirmPermanentDelete(context, task, ref);
+                        break;
+                      default:
+                        break;
+                    }
+                  },
+                  itemBuilder: (context) {
+                    final items = <PopupMenuEntry<String>>[];
+                    items.add(PopupMenuItem(
+                        value: 'favorite',
+                        child: Text(
+                            task.isFavorite ? 'Remove favorite' : 'Favorite')));
+                    items.add(PopupMenuItem(
+                        value: 'pin',
+                        child: Text(task.isPinned ? 'Unpin' : 'Pin')));
+                    if (task.isArchived || task.isDeleted) {
+                      items.add(const PopupMenuItem(
+                          value: 'restore', child: Text('Restore')));
+                      items.add(const PopupMenuItem(
+                          value: 'delete', child: Text('Delete permanently')));
+                    } else {
+                      items.add(const PopupMenuItem(
+                          value: 'archive', child: Text('Archive')));
+                    }
+                    return items;
                   },
                 ),
+                onTap: () {
+                  _showTaskDetails(context, task, ref);
+                },
               ),
-            ],
-          ),
+            ),
+          ],
         ),
-      );
+      ),
+    );
   }
 
   void _scheduleReminderIfNeeded(Task task) {
@@ -267,8 +262,7 @@ class TaskListItem extends ConsumerWidget {
     final when = switch (delta) {
       0 => 'Today',
       1 => 'Tomorrow',
-      _ =>
-        '${alarmTime.day}/${alarmTime.month}',
+      _ => '${alarmTime.day}/${alarmTime.month}',
     };
     return '$when $h:$m';
   }
@@ -383,9 +377,8 @@ class TaskListItem extends ConsumerWidget {
                                     decoration: item.done
                                         ? TextDecoration.lineThrough
                                         : null,
-                                    color: item.done
-                                        ? _mutedIcon(context)
-                                        : null,
+                                    color:
+                                        item.done ? _mutedIcon(context) : null,
                                   ),
                                 ),
                               ))

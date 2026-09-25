@@ -197,7 +197,15 @@ class NotificationHelper {
 
   /// Well-known reminder minute offsets used for deterministic cancel.
   static const List<int> knownReminderOffsets = [
-    1, 5, 10, 15, 30, 60, 120, 180, 1440,
+    1,
+    5,
+    10,
+    15,
+    30,
+    60,
+    120,
+    180,
+    1440,
   ];
 
   /// SharedPreferences key remembering the last alarm already surfaced to the
@@ -327,15 +335,33 @@ class NotificationHelper {
   /// Nothing breaks when it is never granted: the native scheduler falls back
   /// to inexact alarms, so reminders still fire (possibly a little late)
   /// rather than silently disappearing.
-  static Future<void> requestExactAlarmAccess() async {
-    if (kIsWeb) return;
+  static Future<bool> requestExactAlarmAccess() async {
+    if (kIsWeb) return true;
     try {
       await ensureInitialized();
       final androidImpl = _notifications.resolvePlatformSpecificImplementation<
           AndroidFlutterLocalNotificationsPlugin>();
       await androidImpl?.requestExactAlarmsPermission();
+      final granted = await AlarmChannel.canScheduleExactAlarms();
+      debugPrint(
+          'Exact alarm access granted=$granted timezone=${tz.local.name}');
+      return granted;
     } catch (e) {
       debugPrint('Exact alarm access request failed: $e');
+      return false;
+    }
+  }
+
+  static Future<bool> notificationsAllowed() async {
+    if (kIsWeb) return true;
+    try {
+      await ensureInitialized();
+      final androidImpl = _notifications.resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin>();
+      return await androidImpl?.areNotificationsEnabled() ?? true;
+    } catch (e) {
+      debugPrint('Notification permission check failed: $e');
+      return true;
     }
   }
 
@@ -420,25 +446,34 @@ class NotificationHelper {
         payload: payload);
   }
 
-  static Future<void> scheduleTaskReminder({
+  static Future<bool> scheduleTaskReminder({
     required int id,
     required String title,
     required String body,
     required DateTime scheduledDate,
   }) async {
     if (kIsWeb) {
-      return;
+      return true;
     }
     await ensureInitialized();
     final now = DateTime.now();
+    final notificationAllowed = await notificationsAllowed();
+    final exactAccess = await AlarmChannel.canScheduleExactAlarms();
+    debugPrint(
+      'Reminder schedule id=$id due=$scheduledDate now=$now '
+      'timezone=${tz.local.name} notificationsAllowed=$notificationAllowed '
+      'exactAccess=$exactAccess',
+    );
+    if (!notificationAllowed) {
+      return false;
+    }
     if (!scheduledDate.isAfter(now)) {
-      debugPrint('Skipping reminder id=$id: $scheduledDate is in the past (now=$now)');
-      return;
+      debugPrint(
+          'Skipping reminder id=$id: $scheduledDate is in the past (now=$now)');
+      return false;
     }
 
-    // Ensure task notification IDs are always positive and within 32-bit range.
     final safeId = id & 0x7FFFFFFF;
-
     try {
       await _notifications.zonedSchedule(
         safeId,
@@ -450,12 +485,11 @@ class NotificationHelper {
         uiLocalNotificationDateInterpretation:
             UILocalNotificationDateInterpretation.absoluteTime,
       );
-      debugPrint('Scheduled reminder id=$id: "$body" at $scheduledDate');
-    } catch (e) {
-      // Exact alarms need the (separate) Alarms & reminders permission on
-      // Android 12+. If it was denied, fall back to an inexact schedule so
-      // reminders still fire instead of being silently dropped forever.
-      debugPrint('Exact schedule failed for id=$id ($e); retrying inexact');
+      debugPrint(
+          'Scheduled reminder id=$id exact=true: "$body" at $scheduledDate');
+      return true;
+    } catch (error) {
+      debugPrint('Exact schedule failed for id=$id ($error); retrying inexact');
       try {
         await _notifications.zonedSchedule(
           safeId,
@@ -467,52 +501,65 @@ class NotificationHelper {
           uiLocalNotificationDateInterpretation:
               UILocalNotificationDateInterpretation.absoluteTime,
         );
-      } catch (e2) {
-        debugPrint('Failed to schedule reminder id=$id: $e2');
+        debugPrint(
+            'Scheduled reminder id=$id exact=false: "$body" at $scheduledDate');
+        return true;
+      } catch (fallbackError) {
+        debugPrint('Failed to schedule reminder id=$id: $fallbackError');
+        return false;
       }
     }
   }
 
-  static Future<void> scheduleTaskReminders({
+  static Future<int> scheduleTaskReminders({
     required String taskId,
     required String taskTitle,
     required DateTime taskDateTime,
     required List<int> reminderMinutes,
   }) async {
     if (kIsWeb) {
-      return;
+      return 0;
     }
 
     await ensureInitialized();
     final capped = reminderMinutes.length > maxReminders
         ? reminderMinutes.sublist(0, maxReminders)
         : reminderMinutes;
-    // One clock read for the whole batch so each reminder is evaluated against
-    // the same "now" (hoisted out of the per-reminder loop).
     final now = DateTime.now();
-    for (int i = 0; i < capped.length; i++) {
-      final minutes = capped[i];
+    var scheduled = 0;
+    for (final minutes in capped) {
+      if (minutes <= 0 || minutes > 1440) {
+        debugPrint(
+            'Skipping invalid reminder offset task=$taskId minutes=$minutes');
+        continue;
+      }
       final scheduledDate = taskDateTime.subtract(Duration(minutes: minutes));
       if (!scheduledDate.isAfter(now)) {
+        debugPrint(
+          'Skipping past reminder task=$taskId minutes=$minutes '
+          'scheduled=$scheduledDate now=$now timezone=${tz.local.name}',
+        );
         continue;
       }
 
       final timeStr =
           '${taskDateTime.hour.toString().padLeft(2, '0')}:${taskDateTime.minute.toString().padLeft(2, '0')}';
-
       final body = minutes <= 1
           ? '$taskTitle starts at $timeStr'
           : 'In $minutes min: $taskTitle at $timeStr';
-
-      // Use deterministic ID based on reminder offset (not list index) so
-      // editing the reminder list never causes collisions.
-      await scheduleTaskReminder(
+      final didSchedule = await scheduleTaskReminder(
         id: NotificationId.taskReminder(taskId, minutes),
         title: 'Task Reminder',
         body: body,
         scheduledDate: scheduledDate,
       );
+      if (didSchedule) scheduled += 1;
     }
+    debugPrint(
+      'Task reminder reconciliation task=$taskId requested=${capped.length} '
+      'scheduled=$scheduled timezone=${tz.local.name}',
+    );
+    return scheduled;
   }
 
   /// Schedules a REAL task alarm at [alarmTime]. The alarm is armed through
@@ -521,46 +568,50 @@ class NotificationHelper {
   /// the app is open, backgrounded, or dead — never gated behind a
   /// notification tap. Sound, vibration and snooze come from the global
   /// Settings at ring time.
-  static Future<void> scheduleTaskAlarm({
+  static Future<bool> scheduleTaskAlarm({
     required String taskId,
     required String taskTitle,
     required DateTime alarmTime,
   }) async {
-    if (kIsWeb) return;
+    if (kIsWeb) return true;
 
     final now = DateTime.now();
+    final exactAccess = await AlarmChannel.canScheduleExactAlarms();
+    debugPrint(
+      'Task alarm schedule task=$taskId alarmTime=$alarmTime now=$now '
+      'timezone=${tz.local.name} exactAccess=$exactAccess',
+    );
     if (!alarmTime.isAfter(now)) {
       debugPrint('Skipping alarm for task $taskId: $alarmTime is in the past');
-      return;
+      return false;
     }
 
-    final id = NotificationId.taskAlarm(taskId);
-    await AlarmChannel.schedule(
-      requestCode: id,
+    final result = await AlarmChannel.schedule(
+      requestCode: NotificationId.taskAlarm(taskId),
       alarmTime: alarmTime,
       taskId: taskId,
       taskTitle: taskTitle,
     );
+    return result.armed;
   }
 
   /// Re-alarms the same task [duration] from now. Cancels the original
   /// firing alarm first so the two can never ring together, then re-arms the
   /// same request code natively (a snoozed alarm still rings through the
   /// full-screen AlarmActivity with current global settings).
-  static Future<void> snoozeTaskAlarm({
+  static Future<bool> snoozeTaskAlarm({
     required String taskId,
     required String taskTitle,
     required Duration duration,
   }) async {
-    if (kIsWeb) return;
-    final id = NotificationId.taskAlarm(taskId);
-    await AlarmChannel.cancel(requestCode: id);
-    await AlarmChannel.schedule(
-      requestCode: id,
+    if (kIsWeb) return true;
+    final result = await AlarmChannel.schedule(
+      requestCode: NotificationId.taskAlarm(taskId),
       alarmTime: DateTime.now().add(duration),
       taskId: taskId,
       taskTitle: taskTitle,
     );
+    return result.armed;
   }
 
   /// Plays a short sample of the configured alarm sound without stealing the
@@ -570,10 +621,14 @@ class NotificationHelper {
     if (kIsWeb) return;
     await AlarmSoundService.playPreview(
       soundId: config.sound.name,
-      customUri: config.sound == PyloAlarmSound.custom
-          ? config.customUri
-          : null,
+      customUri:
+          config.sound == PyloAlarmSound.custom ? config.customUri : null,
     );
+  }
+
+  static Future<void> cancelTaskAlarm(String taskId) async {
+    if (kIsWeb) return;
+    await AlarmChannel.cancel(requestCode: NotificationId.taskAlarm(taskId));
   }
 
   static Future<void> cancelAllForTask(String taskId,
@@ -645,7 +700,8 @@ class NotificationHelper {
     }
 
     // Birthday IDs use an offset namespace to prevent collisions with task IDs.
-    final notificationId = (key.hashCode + NotificationId.birthdayOffset) & 0x7FFFFFFF;
+    final notificationId =
+        (key.hashCode + NotificationId.birthdayOffset) & 0x7FFFFFFF;
 
     try {
       await _notifications.zonedSchedule(
@@ -661,7 +717,8 @@ class NotificationHelper {
       );
       debugPrint('Scheduled yearly reminder "$title" at $scheduled');
     } catch (e) {
-      debugPrint('Exact yearly schedule failed for "$title" ($e); retrying inexact');
+      debugPrint(
+          'Exact yearly schedule failed for "$title" ($e); retrying inexact');
       try {
         await _notifications.zonedSchedule(
           notificationId,
@@ -695,8 +752,7 @@ class NotificationHelper {
 
     await cancelAllForBirthday(birthdayId);
 
-    final dateStr =
-        '${nextBirthday.day}/${nextBirthday.month}';
+    final dateStr = '${nextBirthday.day}/${nextBirthday.month}';
 
     for (final days in reminderDaysBefore) {
       // Build the scheduled DateTime with the user's chosen reminder time.
@@ -752,12 +808,16 @@ class NotificationHelper {
     // Birthday IDs use the offset namespace.
     final cancelFutures = <Future<void>>[];
     for (final days in [0, 1, 3, 7]) {
-      final id = (('$birthdayId-$days'.hashCode) + NotificationId.birthdayOffset) & 0x7FFFFFFF;
+      final id =
+          (('$birthdayId-$days'.hashCode) + NotificationId.birthdayOffset) &
+              0x7FFFFFFF;
       cancelFutures.add(_notifications.cancel(id));
       // Legacy ids (older builds) included a birth-year suffix.
       final now = DateTime.now();
       for (var year = now.year - 2; year <= now.year + 2; year++) {
-        final legacyId = (('$birthdayId-$days-$year'.hashCode) + NotificationId.birthdayOffset) & 0x7FFFFFFF;
+        final legacyId = (('$birthdayId-$days-$year'.hashCode) +
+                NotificationId.birthdayOffset) &
+            0x7FFFFFFF;
         cancelFutures.add(_notifications.cancel(legacyId));
       }
     }
@@ -903,6 +963,16 @@ class NotificationHelper {
   static Future<void> openExactAlarmSettings() async {
     if (kIsWeb) return;
     await AlarmChannel.openExactAlarmSettings();
+  }
+
+  static Future<bool> canUseFullScreenIntent() async {
+    if (kIsWeb) return true;
+    return AlarmChannel.canUseFullScreenIntent();
+  }
+
+  static Future<void> openFullScreenIntentSettings() async {
+    if (kIsWeb) return;
+    await AlarmChannel.openFullScreenIntentSettings();
   }
 }
 

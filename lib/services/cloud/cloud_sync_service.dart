@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
+import 'package:http/http.dart' as http;
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:uuid/uuid.dart';
 
@@ -9,8 +10,8 @@ import '../../database/database_helper.dart';
 import '../../models/checklist_model.dart';
 import '../../models/task_model.dart';
 import 'cloud_config_store.dart';
-import 'net_probe_io.dart'
-    if (dart.library.js) 'net_probe_web.dart' as net_probe;
+import 'net_probe_io.dart' if (dart.library.js) 'net_probe_web.dart'
+    as net_probe;
 import 'supabase_config.dart';
 import 'today_data_serializer.dart';
 
@@ -59,21 +60,33 @@ class CloudSyncResult {
 ///  - A single in-flight guard + payload-hash dedupe skip no-op uploads.
 ///  - Uploads PULL FIRST (merge remote completions, then push) so a stale local
 ///    snapshot can never erase a remote change this device has not seen yet.
+typedef CloudHttpClientFactory = http.Client Function();
+
 class CloudSyncService {
-  CloudSyncService(this._dbHelper, this._configStore);
+  CloudSyncService(
+    this._dbHelper,
+    this._configStore, {
+    CloudHttpClientFactory? httpClientFactory,
+  }) : _httpClientFactory = httpClientFactory ?? http.Client.new;
 
   final DatabaseHelper _dbHelper;
   final CloudConfigStore _configStore;
+  final CloudHttpClientFactory _httpClientFactory;
 
   /// The user's project-backed Supabase client. Built lazily from the stored
   /// [CloudConfig] (see [_buildClient]); null until the user connects a project.
   SupabaseClient? _clientObject;
+  CloudConfig? _clientConfig;
+  int _clientGeneration = 0;
+  Future<void> _clientOperationQueue = Future<void>.value();
+  bool _configInFlight = false;
+  bool _disposed = false;
+  Future<void>? _disposeFuture;
 
   /// Session persistence for the CURRENT project's client. Scoped by the
   /// project ref so two different projects never read each other's sessions.
   LocalStorage? _clientSessionStorage;
 
-  Completer<void>? _initCompleter;
   bool _initialized = false;
   bool _initFailed = false;
 
@@ -82,6 +95,12 @@ class CloudSyncService {
   final ValueNotifier<User?> authUser = ValueNotifier<User?>(null);
 
   StreamSubscription<AuthState>? _authSub;
+
+  CloudConfig? _authorizedTestConfig;
+  int _testGeneration = 0;
+  bool _testInFlight = false;
+  bool _createInFlight = false;
+  http.Client? _testHttpClient;
 
   Timer? _syncDebounce;
   bool _syncInFlight = false;
@@ -138,30 +157,33 @@ class CloudSyncService {
   /// build-time default ([SupabaseConfig]) in a release built with the anon
   /// key, or once a client was successfully built for either. False only when
   /// both are absent — the app runs fully offline.
-  bool get isConfigured =>
-      _initialized ||
-      _configStore.current?.isConfigured == true ||
-      SupabaseConfig.isConfigured;
-  bool get isInitialized => _initialized;
+  bool get isConfigured {
+    if (_disposed) return false;
+    if (_initialized && _clientObject != null) return true;
+    final stored = _configStore.current;
+    if (stored != null) return stored.isConfigured;
+    return SupabaseConfig.toCloudConfig()?.isConfigured ?? false;
+  }
+
+  bool get isInitialized => !_disposed && _initialized;
 
   bool get isSignedIn {
-    if (!_initialized) return false;
+    if (_disposed || !_initialized) return false;
     final client = _clientObject;
     return client != null && client.auth.currentUser != null;
   }
 
   String? get currentUserId {
-    if (!_initialized) return null;
+    if (_disposed || !_initialized) return null;
     return _clientObject?.auth.currentUser?.id;
   }
 
   String? get currentEmail {
-    if (!_initialized) return null;
+    if (_disposed || !_initialized) return null;
     return _clientObject?.auth.currentUser?.email;
   }
 
   GoTrueClient get _auth => _clientObject!.auth;
-  SupabaseClient get _client => _clientObject!;
 
   /// The project the sync service dials, in precedence order:
   /// 1. the user's own connected Supabase project ([CloudConfigStore]), or
@@ -171,7 +193,7 @@ class CloudSyncService {
   /// cloud path silently no-ops. Never reveals the anon key.
   Future<CloudConfig?> _effectiveConfig() async {
     final stored = await _configStore.load();
-    if (stored != null && stored.isConfigured) return stored;
+    if (stored != null) return stored;
     return SupabaseConfig.toCloudConfig();
   }
 
@@ -179,34 +201,34 @@ class CloudSyncService {
   /// after the first frame, and can never throw: no connected project, an
   /// unreadable secure-storage value or any platform init error simply leaves
   /// the app in full offline mode.
-  Future<void> ensureInitialized() async {
-    if (_initialized || _initFailed) return;
-    final inFlight = _initCompleter;
-    if (inFlight != null) {
-      await inFlight.future;
-      return;
-    }
+  Future<void> ensureInitialized() {
+    if (_disposed) return Future<void>.value();
+    return _withClientOperation(_ensureInitialized);
+  }
+
+  Future<void> _ensureInitialized() async {
+    if (_disposed || _initialized || _initFailed) return;
     final config = await _effectiveConfig();
+    if (_disposed) return;
     if (config == null || !config.isConfigured) {
       _initFailed = true;
       if (kDebugMode) {
-        debugPrint('PYLO cloud config: ${config?.debugDescription() ?? 'not connected'}');
+        debugPrint(
+            'PYLO cloud config: ${config?.debugDescription() ?? 'not connected'}');
       }
       return;
     }
-    if (kDebugMode) debugPrint('PYLO cloud config: ${config.debugDescription()}');
-    final completer = Completer<void>();
-    _initCompleter = completer;
+    if (kDebugMode) {
+      debugPrint('PYLO cloud config: ${config.debugDescription()}');
+    }
     try {
-      await _buildClient(config);
-      _initialized = true;
-      completer.complete();
+      await _buildClientUnlocked(config);
+      if (!_disposed) {
+        _initialized = true;
+      }
     } catch (e, st) {
       _initFailed = true;
       if (kDebugMode) debugPrint('Cloud init failed: $e\n$st');
-      completer.complete();
-    } finally {
-      _initCompleter = null;
     }
   }
 
@@ -219,8 +241,8 @@ class CloudSyncService {
   /// normally does it only exists for `Supabase.initialize`): the same JSON
   /// format is stored under the same per-project key scheme, and restored with
   /// `recoverSession` on every build.
-  Future<void> _buildClient(CloudConfig config) async {
-    await _disposeClient();
+  Future<void> _buildClientUnlocked(CloudConfig config) async {
+    await _disposeClientUnlocked();
     final storage = SharedPreferencesLocalStorage(
       persistSessionKey: 'sb-${config.projectRef ?? 'pylo'}-auth-token',
     );
@@ -233,18 +255,34 @@ class CloudSyncService {
       config.anonKey,
       authOptions: const FlutterAuthClientOptions(),
     );
-    _clientObject = client;
-    _clientSessionStorage = storage;
+    if (_disposed) {
+      await client.dispose();
+      return;
+    }
 
-    _authSub?.cancel();
+    _clientObject = client;
+    _clientConfig = config;
+    _clientSessionStorage = storage;
+    final generation = ++_clientGeneration;
     _authSub = client.auth.onAuthStateChange.listen(
-      _onAuthStateChanged,
+      (state) {
+        if (_disposed ||
+            generation != _clientGeneration ||
+            !identical(_clientObject, client)) {
+          return;
+        }
+        _onAuthStateChanged(state);
+      },
       onError: (Object e, StackTrace st) {
-        if (kDebugMode) debugPrint('Cloud auth stream error: $e\n$st');
+        if (!_disposed &&
+            generation == _clientGeneration &&
+            identical(_clientObject, client) &&
+            kDebugMode) {
+          debugPrint('Cloud auth stream error: $e\n$st');
+        }
       },
     );
 
-    // Restore any persisted session for THIS project (local read, no network).
     try {
       final persisted = await storage.accessToken();
       if (persisted != null && persisted.isNotEmpty) {
@@ -253,15 +291,43 @@ class CloudSyncService {
     } catch (e) {
       if (kDebugMode) debugPrint('Cloud session restore skipped: $e');
     }
+    if (_disposed ||
+        generation != _clientGeneration ||
+        !identical(_clientObject, client)) {
+      await _disposeClientUnlocked();
+      return;
+    }
     authUser.value = client.auth.currentUser;
+  }
+
+  Future<T> _withClientOperation<T>(Future<T> Function() operation) async {
+    final previous = _clientOperationQueue;
+    final release = Completer<void>();
+    _clientOperationQueue = release.future;
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release.complete();
+    }
   }
 
   /// Tears down the current project's client and every resource tied to it:
   /// auth subscription, realtime channel, timers, cached sync state and the
   /// persisted-session handle. SQLite data is never touched.
-  Future<void> _disposeClient() async {
-    _authSub?.cancel();
+  Future<void> _disposeClientUnlocked() async {
+    _clientGeneration++;
+    final authSub = _authSub;
     _authSub = null;
+    if (authSub != null) {
+      try {
+        await authSub.cancel();
+      } catch (_) {}
+    }
+    _syncDebounce?.cancel();
+    _syncDebounce = null;
+    _pullDebounce?.cancel();
+    _pullDebounce = null;
     _unsubscribeRealtime();
     _stopCloudRefreshTimer();
     _lastAppliedDateKey = null;
@@ -272,6 +338,7 @@ class CloudSyncService {
     authUser.value = null;
     final client = _clientObject;
     _clientObject = null;
+    _clientConfig = null;
     _clientSessionStorage = null;
     _initialized = false;
     if (client == null) return;
@@ -284,8 +351,10 @@ class CloudSyncService {
   /// on login/token refresh, removes it on explicit logout. Keeps the current
   /// project's session restorable across app restarts.
   Future<void> _persistSession(AuthState state) async {
+    if (_disposed) return;
     final storage = _clientSessionStorage;
     if (storage == null) return;
+    final generation = _clientGeneration;
     final session = state.session;
     try {
       if (session != null) {
@@ -296,6 +365,7 @@ class CloudSyncService {
     } catch (e) {
       if (kDebugMode) debugPrint('Cloud session persist failed: $e');
     }
+    if (_disposed || generation != _clientGeneration) return;
   }
 
   /// Restores any persisted session (local read, no network) so cloud sync
@@ -303,7 +373,9 @@ class CloudSyncService {
   /// queues a debounced upload of today's snapshot, subscribes to the user's
   /// realtime channel and pulls any completion changes made from the website.
   Future<void> restoreSession() async {
+    if (_disposed) return;
     await ensureInitialized();
+    if (_disposed) return;
     authUser.value = _initialized ? _clientObject?.auth.currentUser : null;
     if (_initialized && isSignedIn) {
       final userId = currentUserId;
@@ -319,6 +391,7 @@ class CloudSyncService {
   /// queues an immediate upload + pull; a lost session tears down the
   /// realtime listener and the background refresh timer.
   void _onAuthStateChanged(AuthState state) {
+    if (_disposed) return;
     unawaited(_persistSession(state));
     // `AuthState.session` is a public field of another library, so it cannot be
     // type-promoted by a null check — hold it in a local instead.
@@ -339,14 +412,10 @@ class CloudSyncService {
   }
 
   Future<bool> _prepare() async {
-    final config = await _effectiveConfig();
-    if (config == null || !config.isConfigured) return false;
-    // A previous startup attempt latched "not configured" when the secure-storage
-    // read transiently returned empty; the config clearly exists now, so retry
-    // the client build instead of permanently reporting not-configured.
+    if (_disposed) return false;
     if (_initFailed) _initFailed = false;
     await ensureInitialized();
-    return _initialized;
+    return !_disposed && _initialized && _clientObject != null;
   }
 
   CloudSyncResult _notConfigured() => const CloudSyncResult.fail(
@@ -362,12 +431,13 @@ class CloudSyncService {
   /// clear probe verdict blocks; an ambiguous or reachable result returns
   /// null and the real request is the source of truth (the probe is cheap and
   /// best-effort, so a false negative here must never block a genuine user).
-  Future<CloudSyncResult?> _preflightNetwork() async {
-    final config = await _effectiveConfig();
+  Future<CloudSyncResult?> _preflightNetwork(
+      [CloudConfig? requestedConfig]) async {
+    final config = requestedConfig ?? await _effectiveConfig();
     final baseUri = config?.baseUri;
     if (baseUri == null) return null;
-    final probe = await net_probe
-        .probeHostReachability(baseUri, timeout: _probeTimeout);
+    final probe =
+        await net_probe.probeHostReachability(baseUri, timeout: _probeTimeout);
     switch (probe.status) {
       case net_probe.HostReachability.noInternet:
       case net_probe.HostReachability.cloudUnreachable:
@@ -382,165 +452,340 @@ class CloudSyncService {
 
   // ── Bring your own cloud (Create Account screen) ──────────────────────
 
-  /// Applies the user's chosen project and (re)builds the client immediately.
-  /// A changed URL/key rebinds the active client; an unchanged config is a
-  /// no-op. Local SQLite data is never touched. Called right before signing up
-  /// so the account is created on the user's OWN project.
-  Future<void> setConfig(CloudConfig config) async {
-    final previous = await _configStore.load();
-    await _configStore.save(config);
-    if (previous != null && previous.sameAs(config) && _clientObject != null) {
-      return;
+  Future<CloudSyncResult> setConfig(CloudConfig config) {
+    if (_disposed) return Future.value(_notConfigured());
+    if (_testInFlight || _createInFlight || _configInFlight) {
+      return Future.value(_operationInProgress());
     }
-    _initialized = false;
-    _initFailed = false;
-    await _disposeClient();
-    await ensureInitialized();
-    if (_initialized && isSignedIn) {
-      scheduleSync();
-      schedulePull();
+    final normalized = CloudConfig(url: config.url, anonKey: config.anonKey);
+    final configError = normalized.validationError;
+    if (configError != null) {
+      return Future.value(CloudSyncResult.fail(
+        CloudSyncErrorKind.invalidCredentials,
+        configError,
+      ));
+    }
+    final authorizationGeneration = _testGeneration;
+    if (!_authorizationIsCurrent(normalized, authorizationGeneration)) {
+      return Future.value(_connectionTestRequired());
+    }
+    _configInFlight = true;
+    return _runConfigOperation(normalized, authorizationGeneration);
+  }
+
+  Future<CloudSyncResult> _runConfigOperation(
+    CloudConfig config,
+    int authorizationGeneration,
+  ) async {
+    try {
+      return await _applyConfig(config, authorizationGeneration);
+    } finally {
+      _configInFlight = false;
     }
   }
 
-  /// Turns cloud sync OFF: drops the stored project and disposes the client
-  /// and any session. Local SQLite data is never touched and the app returns
-  /// to full offline mode (all sync paths silently no-op again).
+  Future<CloudSyncResult> _applyConfig(
+    CloudConfig config,
+    int authorizationGeneration,
+  ) {
+    return _withClientOperation(() async {
+      if (_disposed) return _notConfigured();
+      final configError = config.validationError;
+      if (configError != null) {
+        return CloudSyncResult.fail(
+          CloudSyncErrorKind.invalidCredentials,
+          configError,
+        );
+      }
+      if (!_authorizationIsCurrent(config, authorizationGeneration)) {
+        return _connectionTestRequired();
+      }
+
+      if (_clientObject != null && _clientConfig?.sameAs(config) == true) {
+        await _configStore.save(config);
+        if (_disposed) return _notConfigured();
+        if (!_authorizationIsCurrent(config, authorizationGeneration)) {
+          return _connectionTestRequired();
+        }
+        return const CloudSyncResult.ok();
+      }
+
+      _initialized = false;
+      _initFailed = false;
+      await _disposeClientUnlocked();
+      if (_disposed) return _notConfigured();
+      if (!_authorizationIsCurrent(config, authorizationGeneration)) {
+        return _connectionTestRequired();
+      }
+      try {
+        await _buildClientUnlocked(config);
+      } catch (e) {
+        if (kDebugMode) debugPrint('Cloud config replacement failed: $e');
+        if (!_disposed) await _disposeClientUnlocked();
+        return const CloudSyncResult.fail(
+          CloudSyncErrorKind.server,
+          'The tested project could not be initialized. Test it again.',
+        );
+      }
+      if (_disposed) return _notConfigured();
+      if (!_authorizationIsCurrent(config, authorizationGeneration)) {
+        await _disposeClientUnlocked();
+        return _connectionTestRequired();
+      }
+      await _configStore.save(config);
+      if (_disposed) return _notConfigured();
+      if (!_authorizationIsCurrent(config, authorizationGeneration)) {
+        await _disposeClientUnlocked();
+        return _connectionTestRequired();
+      }
+      _initialized = true;
+      _initFailed = false;
+      if (isSignedIn) {
+        scheduleSync();
+        schedulePull();
+      }
+      return const CloudSyncResult.ok();
+    });
+  }
+
   Future<void> clearConfig() async {
-    await _configStore.clear();
-    _initialized = false;
-    _initFailed = false;
-    await _disposeClient();
+    if (_disposed) return;
+    invalidateConnectionTest();
+    if (_testInFlight || _createInFlight || _configInFlight) {
+      return;
+    }
+    _configInFlight = true;
+    try {
+      await _withClientOperation(() async {
+        await _configStore.clear();
+        _initialized = false;
+        _initFailed = false;
+        await _disposeClientUnlocked();
+      });
+    } finally {
+      _configInFlight = false;
+    }
+  }
+
+  bool isConnectionTestAuthorized(CloudConfig config) {
+    return _isConnectionTestAuthorized(config);
+  }
+
+  void invalidateConnectionTest() {
+    _testGeneration++;
+    _authorizedTestConfig = null;
+  }
+
+  bool _isConnectionTestAuthorized(CloudConfig config) {
+    final authorized = _authorizedTestConfig;
+    return !_disposed &&
+        authorized != null &&
+        config.isConfigured &&
+        authorized.sameAs(config);
+  }
+
+  bool _authorizationIsCurrent(CloudConfig config, int generation) {
+    return generation == _testGeneration && _isConnectionTestAuthorized(config);
+  }
+
+  CloudSyncResult _connectionTestRequired() {
+    return const CloudSyncResult.fail(
+      CloudSyncErrorKind.invalidCredentials,
+      'Test this exact Project URL and anon/public key before creating the account.',
+    );
+  }
+
+  CloudSyncResult _operationInProgress() {
+    return const CloudSyncResult.fail(
+      CloudSyncErrorKind.unknown,
+      'Wait for the current cloud connection test to finish.',
+    );
   }
 
   /// Verifies a candidate Supabase project (URL + anon key) WITHOUT saving it
-  /// or touching the active client. A throwaway client first proves the project
-  /// answers: a healthy project rejects a clearly-bogus login with "invalid
-  /// login credentials", which confirms the URL and anon key are correct and
-  /// reachable (no email sent, no session created). It then checks that the
-  /// `daily_data` and `profiles` tables exist with the columns the app uses.
+  /// or touching the active client. It checks the Supabase Auth health endpoint
+  /// and then verifies the `daily_data` and `profiles` table shapes.
   Future<CloudSyncResult> testConnection(String url, String anonKey) async {
-    final trimmedUrl = url.trim();
-    final trimmedKey = anonKey.trim();
-    if (trimmedUrl.isEmpty || trimmedKey.isEmpty) {
-      return const CloudSyncResult.fail(
+    if (_disposed) return _notConfigured();
+    if (_testInFlight || _createInFlight || _configInFlight) {
+      return _operationInProgress();
+    }
+
+    final candidate = CloudConfig(url: url, anonKey: anonKey);
+    final configError = candidate.validationError;
+    if (configError != null) {
+      _authorizedTestConfig = null;
+      return CloudSyncResult.fail(
         CloudSyncErrorKind.invalidCredentials,
-        'Enter both the Project URL and the anon/public key first.',
+        configError,
       );
     }
-    final candidate = CloudConfig(url: trimmedUrl, anonKey: trimmedKey);
-    if (!candidate.isConfigured) {
-      return const CloudSyncResult.fail(
-        CloudSyncErrorKind.invalidCredentials,
-        'That does not look like a Supabase project URL. It should look like '
-        'https://<project-ref>.supabase.co',
-      );
-    }
-    SupabaseClient? probe;
+
+    _testInFlight = true;
+    final generation = ++_testGeneration;
+    _authorizedTestConfig = null;
+    http.Client? client;
+    CloudSyncResult result;
     try {
-      probe = SupabaseClient(
-        trimmedUrl,
-        trimmedKey,
-        authOptions: const FlutterAuthClientOptions(),
-      );
-
-      // 1) Prove the project + anon key answer.
-      try {
-        await probe.auth
-            .signInWithPassword(
-              email: 'pylo-connection-check@invalid.local',
-              password: 'pylo-connection-check-invalid-password',
-            )
-            .timeout(_timeout);
-        // A real project never signs in this bogus account; reaching here only
-        // happens against an unusual endpoint.
-        return const CloudSyncResult.fail(
-          CloudSyncErrorKind.server,
-          'The project answered in an unexpected way. Double-check that this is '
-          'a Supabase project URL and its anon/public key.',
-        );
-      } on AuthException catch (e) {
-        final text = e.message.toLowerCase();
-        final code = (e.code ?? '').toLowerCase();
-        if (code.contains('invalid_credentials') ||
-            text.contains('invalid login credentials') ||
-            text.contains('invalid credentials')) {
-          // A healthy project rejects the bogus login with "invalid login
-          // credentials" (no email sent, no session created). The URL + key
-          // are proven reachable; fall through to the table-shape check.
-        } else {
-          final mapped = _mapServerAuthError(e);
-          if (mapped != null) {
-            // Invalid key / wrong project / disabled auth — the message says
-            // which field to fix.
-            return mapped;
-          }
-          return CloudSyncResult.fail(
-            CloudSyncErrorKind.server,
-            'The project answered with HTTP ${e.statusCode ?? '?'}'
-            '${e.message.isNotEmpty ? ' (${e.message})' : ''}.',
-          );
-        }
+      client = _httpClientFactory();
+      _testHttpClient = client;
+      final headers = <String, String>{
+        'apikey': candidate.anonKey,
+        'Authorization': 'Bearer ${candidate.anonKey}',
+      };
+      final baseUri = candidate.baseUri!;
+      final health = await _get(
+        client,
+        baseUri.resolve('/auth/v1/health'),
+        headers,
+      ).timeout(_timeout);
+      if (health.statusCode < 200 || health.statusCode >= 300) {
+        result = _healthFailure(health.statusCode);
+      } else {
+        final tableIssue = await _checkTableShape(client, candidate);
+        result = tableIssue ??
+            const CloudSyncResult.ok(
+              'Connected! This project is ready for PYLO cloud sync.',
+            );
       }
-
-      // 2) Verify the tables exist with the expected column shape.
-      final tableIssue = await _checkTableShape(probe);
-      if (tableIssue != null) return tableIssue;
-
-      return const CloudSyncResult.ok(
-        'Connected! This project is ready for PYLO cloud sync.',
-      );
     } catch (e) {
       if (kDebugMode) debugPrint('Cloud test connection failed: $e');
-      return const CloudSyncResult.fail(
+      result = const CloudSyncResult.fail(
         CloudSyncErrorKind.network,
         'Could not reach that project. Check the Project URL and your internet '
         'connection, then try again.',
       );
     } finally {
-      if (probe != null) {
+      if (identical(_testHttpClient, client)) {
+        _testHttpClient = null;
         try {
-          await probe.dispose();
+          client?.close();
         } catch (_) {}
       }
+      _testInFlight = false;
     }
+
+    if (result.ok &&
+        !_disposed &&
+        !_createInFlight &&
+        !_configInFlight &&
+        generation == _testGeneration) {
+      _authorizedTestConfig = candidate;
+    } else {
+      _authorizedTestConfig = null;
+    }
+    return result;
+  }
+
+  Future<http.Response> _get(
+    http.Client client,
+    Uri uri,
+    Map<String, String> headers,
+  ) async {
+    final request = http.Request('GET', uri)..followRedirects = false;
+    request.headers.addAll(headers);
+    final response = await client.send(request);
+    return http.Response.fromStream(response);
+  }
+
+  CloudSyncResult _healthFailure(int statusCode) {
+    if (statusCode == 401 || statusCode == 403) {
+      return const CloudSyncResult.fail(
+        CloudSyncErrorKind.invalidCredentials,
+        'This project rejected the anon/public key. Copy the anon or publishable '
+        'key from Settings → API.',
+      );
+    }
+    if (statusCode == 404) {
+      return const CloudSyncResult.fail(
+        CloudSyncErrorKind.invalidCredentials,
+        'No Supabase project was found at that URL. Check the Project URL.',
+      );
+    }
+    return CloudSyncResult.fail(
+      CloudSyncErrorKind.server,
+      'Supabase health check failed with HTTP $statusCode. Try again shortly.',
+    );
   }
 
   /// Selects with the exact columns the app reads/writes. A missing table or a
   /// wrong column shape makes PostgREST fail instead of returning rows, which
   /// is how "did you run the SQL script?" is detected. RLS never interferes:
   /// an empty (RLS-filtered) result is still a 200.
-  Future<CloudSyncResult?> _checkTableShape(SupabaseClient client) async {
+  Future<CloudSyncResult?> _checkTableShape(
+    http.Client client,
+    CloudConfig candidate,
+  ) async {
+    final headers = <String, String>{
+      'apikey': candidate.anonKey,
+      'Authorization': 'Bearer ${candidate.anonKey}',
+      'Accept': 'application/json',
+    };
     try {
-      await client
-          .from('daily_data')
-          .select('id,user_id,data_date,tasks,lists,sublists,updated_at')
-          .limit(0)
-          .timeout(_timeout);
-    } on PostgrestException catch (e) {
-      return _tablesNotReady(e, step: 'Step 6 (daily_data)');
-    } catch (_) {
-      return null; // only a decoded PostgREST error proves a shape problem.
-    }
-    try {
-      await client
-          .from('profiles')
-          .select('id,email,full_name,avatar_url')
-          .limit(0)
-          .timeout(_timeout);
-    } on PostgrestException catch (e) {
-      return _tablesNotReady(e, step: 'Step 5 (profiles)');
-    } catch (_) {
+      final dailyData = await _get(
+        client,
+        candidate.baseUri!.resolve('/rest/v1/daily_data').replace(
+          queryParameters: const {
+            'select': 'id,user_id,data_date,tasks,lists,sublists,updated_at',
+            'limit': '0',
+          },
+        ),
+        headers,
+      ).timeout(_timeout);
+      if (dailyData.statusCode < 200 || dailyData.statusCode >= 300) {
+        return _tablesNotReady(
+          dailyData,
+          step: 'Step 6 (daily_data)',
+        );
+      }
+
+      final profiles = await _get(
+        client,
+        candidate.baseUri!.resolve('/rest/v1/profiles').replace(
+          queryParameters: const {
+            'select': 'id,email,full_name,avatar_url',
+            'limit': '0',
+          },
+        ),
+        headers,
+      ).timeout(_timeout);
+      if (profiles.statusCode < 200 || profiles.statusCode >= 300) {
+        return _tablesNotReady(
+          profiles,
+          step: 'Step 5 (profiles)',
+        );
+      }
       return null;
+    } catch (_) {
+      return const CloudSyncResult.fail(
+        CloudSyncErrorKind.network,
+        'Could not verify the project tables. Check your internet connection '
+        'and try again.',
+      );
     }
-    return null;
   }
 
   CloudSyncResult _tablesNotReady(
-    PostgrestException e, {
+    http.Response response, {
     required String step,
   }) {
-    final code = (e.code ?? '').toLowerCase();
-    final message = e.message.toLowerCase();
+    if (response.statusCode == 401 || response.statusCode == 403) {
+      return const CloudSyncResult.fail(
+        CloudSyncErrorKind.invalidCredentials,
+        'This project rejected the anon/public key.',
+      );
+    }
+    var code = '';
+    var message = '';
+    try {
+      final decoded = jsonDecode(response.body);
+      if (decoded is Map) {
+        code = decoded['code']?.toString() ?? '';
+        message = decoded['message']?.toString() ?? '';
+      }
+    } catch (_) {}
+    code = code.toLowerCase();
+    message = message.toLowerCase();
     final missingTable = code.contains('205') ||
         code.contains('106') ||
         message.contains('could not find the table') ||
@@ -563,14 +808,107 @@ class CloudSyncService {
     return CloudSyncResult.fail(
       CloudSyncErrorKind.server,
       'This project is reachable but the tables could not be verified '
-      '(${e.message}). Run the SQL script from "Help me connect".',
+      '(HTTP ${response.statusCode}). Run the SQL script from "Help me connect".',
     );
   }
 
   // ── Authentication ────────────────────────────────────────────────────
 
+  Future<CloudSyncResult> createAuthorizedAccount({
+    required String url,
+    required String anonKey,
+    required String email,
+    required String password,
+  }) async {
+    if (_disposed) return _notConfigured();
+    if (_testInFlight || _createInFlight || _configInFlight) {
+      return _operationInProgress();
+    }
+
+    final candidate = CloudConfig(url: url, anonKey: anonKey);
+    final configError = candidate.validationError;
+    if (configError != null) {
+      return CloudSyncResult.fail(
+        CloudSyncErrorKind.invalidCredentials,
+        configError,
+      );
+    }
+    final authorizationGeneration = _testGeneration;
+    if (!_authorizationIsCurrent(candidate, authorizationGeneration)) {
+      return _connectionTestRequired();
+    }
+
+    final normalizedEmail = _normalizeEmail(email);
+    final emailProblem = _validateEmail(normalizedEmail);
+    if (emailProblem != null) {
+      return CloudSyncResult.fail(
+        CloudSyncErrorKind.invalidEmail,
+        emailProblem,
+      );
+    }
+    if (password.length < 6) {
+      return const CloudSyncResult.fail(
+        CloudSyncErrorKind.weakPassword,
+        'Password must be at least 6 characters.',
+      );
+    }
+
+    _createInFlight = true;
+    _configInFlight = true;
+    try {
+      final applied =
+          await _runConfigOperation(candidate, authorizationGeneration);
+      if (!applied.ok) return applied;
+      if (_disposed) return _notConfigured();
+      if (!_authorizationIsCurrent(candidate, authorizationGeneration)) {
+        return _connectionTestRequired();
+      }
+
+      final probeIssue = await _preflightNetwork(candidate);
+      if (probeIssue != null) return probeIssue;
+      if (_disposed) return _notConfigured();
+      if (!_authorizationIsCurrent(candidate, authorizationGeneration)) {
+        return _connectionTestRequired();
+      }
+
+      final client = _clientObject;
+      if (client == null) return _notConfigured();
+      final res = await client.auth
+          .signUp(email: normalizedEmail, password: password)
+          .timeout(_timeout);
+      if (_disposed) return _notConfigured();
+      if (!_authorizationIsCurrent(candidate, authorizationGeneration)) {
+        return _connectionTestRequired();
+      }
+      if (res.session != null) {
+        authUser.value = res.session?.user;
+        scheduleSync();
+        return const CloudSyncResult.ok();
+      }
+      return const CloudSyncResult.ok(
+        'Account created. Check your inbox to confirm your email address '
+        'before logging in.',
+      );
+    } catch (e) {
+      if (_disposed) return _notConfigured();
+      return _classify(e);
+    } finally {
+      _configInFlight = false;
+      _createInFlight = false;
+    }
+  }
+
   Future<CloudSyncResult> signUp(String email, String password) async {
+    if (_disposed || _testInFlight || _createInFlight || _configInFlight) {
+      return _operationInProgress();
+    }
     if (!await _prepare()) return _notConfigured();
+    final config = await _effectiveConfig();
+    final authorizationGeneration = _testGeneration;
+    if (config == null ||
+        !_authorizationIsCurrent(config, authorizationGeneration)) {
+      return _connectionTestRequired();
+    }
     final normalized = _normalizeEmail(email);
     final emailProblem = _validateEmail(normalized);
     if (emailProblem != null) {
@@ -587,8 +925,11 @@ class CloudSyncService {
     }
     // Connectivity validation before signUp: fail fast with a differentiated
     // message and never present credentials to a clearly unreachable host.
-    final probeIssue = await _preflightNetwork();
+    final probeIssue = await _preflightNetwork(config);
     if (probeIssue != null) return probeIssue;
+    if (!_authorizationIsCurrent(config, authorizationGeneration)) {
+      return _connectionTestRequired();
+    }
     try {
       final res = await _auth
           .signUp(email: normalized, password: password)
@@ -884,9 +1225,10 @@ class CloudSyncService {
   /// Queues a debounced upload of today's snapshot. Called after every local
   /// mutation (and on login) so bursts of edits coalesce into one request.
   void scheduleSync() {
+    if (_disposed) return;
     _syncDebounce?.cancel();
     _syncDebounce = Timer(const Duration(seconds: 3), () {
-      unawaited(syncNow());
+      if (!_disposed) unawaited(syncNow());
     });
   }
 
@@ -894,8 +1236,11 @@ class CloudSyncService {
   /// Offline-first: never throws, never touches SQLite, never blocks callers.
   /// Concurrent calls coalesce; unchanged payloads skip the network entirely.
   Future<void> syncNow() async {
-    if (_syncInFlight) return;
+    if (_disposed || _syncInFlight) return;
     if (!_initialized || !isSignedIn) return;
+    final generation = _clientGeneration;
+    final client = _clientObject;
+    if (client == null) return;
     _syncInFlight = true;
     try {
       final now = DateTime.now();
@@ -910,34 +1255,34 @@ class CloudSyncService {
       // last push (see [_cloudCompletions]), so it cannot revert our own tick,
       // and it is a no-op when the remote row is unchanged.
       final pulled = await _mergeRemoteRow();
+      if (_disposed || generation != _clientGeneration) return;
       if (pulled > 0) _notifyRemoteApplied();
 
       final data = await buildTodayCloudData(_dbHelper, now);
+      if (_disposed || generation != _clientGeneration) return;
       final payloadHash = _hashPayload(dateKey, data);
       if (dateKey == _syncedDateKey && payloadHash == _syncedPayloadHash) {
         return; // unchanged since the last successful upload for today.
       }
 
       final userId = currentUserId;
-      if (userId == null) return;
+      if (userId == null || generation != _clientGeneration) return;
 
-      await _client
-          .from('daily_data')
-          .upsert(
-            {
-              // The row's PK has no server default, so it must be provided.
-              // A UUIDv5 of (user, date) keeps it identical across upserts.
-              'id': _rowId(userId, dateKey),
-              'user_id': userId,
-              'data_date': dateKey,
-              'tasks': data.tasks,
-              'lists': data.lists,
-              'sublists': data.sublists,
-              'updated_at': DateTime.now().toUtc().toIso8601String(),
-            },
-            onConflict: 'user_id,data_date',
-          )
-          .timeout(_timeout);
+      await client.from('daily_data').upsert(
+        {
+          // The row's PK has no server default, so it must be provided.
+          // A UUIDv5 of (user, date) keeps it identical across upserts.
+          'id': _rowId(userId, dateKey),
+          'user_id': userId,
+          'data_date': dateKey,
+          'tasks': data.tasks,
+          'lists': data.lists,
+          'sublists': data.sublists,
+          'updated_at': DateTime.now().toUtc().toIso8601String(),
+        },
+        onConflict: 'user_id,data_date',
+      ).timeout(_timeout);
+      if (_disposed || generation != _clientGeneration) return;
 
       _syncedDateKey = dateKey;
       _syncedPayloadHash = payloadHash;
@@ -968,18 +1313,22 @@ class CloudSyncService {
   /// (never preferred over the local-date row) and only when it really is within
   /// a day of today — an arbitrary older row is never merged into today.
   Future<Map<String, dynamic>?> fetchToday() async {
-    if (!_initialized || !isSignedIn) return null;
+    if (_disposed || !_initialized || !isSignedIn) return null;
     final userId = currentUserId;
-    if (userId == null) return null;
+    final client = _clientObject;
+    final generation = _clientGeneration;
+    if (userId == null || client == null) return null;
     final now = DateTime.now();
     final localKey = localDateKey(now);
     final utcKey = localDateKey(now.toUtc());
     try {
-      final localRow = await _selectRowForDate(userId, localKey);
+      final localRow =
+          await _selectRowForDate(client, generation, userId, localKey);
       if (localRow != null) return localRow;
 
       if (utcKey != localKey) {
-        final utcRow = await _selectRowForDate(userId, utcKey);
+        final utcRow =
+            await _selectRowForDate(client, generation, userId, utcKey);
         if (utcRow != null && _isNearToday(utcRow['data_date'], now)) {
           if (kDebugMode) {
             debugPrint('[PYLO SYNC] No row dated $localKey; using the '
@@ -996,16 +1345,24 @@ class CloudSyncService {
   }
 
   Future<Map<String, dynamic>?> _selectRowForDate(
+    SupabaseClient client,
+    int generation,
     String userId,
     String dateKey,
   ) async {
-    return await _client
+    final row = await client
         .from('daily_data')
         .select('data_date,tasks,lists,sublists,updated_at')
         .eq('user_id', userId)
         .eq('data_date', dateKey)
         .maybeSingle()
         .timeout(_timeout);
+    if (_disposed ||
+        generation != _clientGeneration ||
+        !identical(_clientObject, client)) {
+      return null;
+    }
+    return row;
   }
 
   /// True when the remote `data_date` is today, yesterday or tomorrow in local
@@ -1029,9 +1386,10 @@ class CloudSyncService {
   /// Debounced pull. Called from realtime events, app resume/startup and the
   /// periodic refresh timer; bursts coalesce into one fetch-apply cycle.
   void schedulePull() {
+    if (_disposed) return;
     _pullDebounce?.cancel();
     _pullDebounce = Timer(const Duration(milliseconds: 600), () {
-      unawaited(syncFromCloud());
+      if (!_disposed) unawaited(syncFromCloud());
     });
   }
 
@@ -1041,11 +1399,13 @@ class CloudSyncService {
   /// blocks callers, never creates/deletes rows — only completion flags are
   /// touched, and only for rows that already exist locally.
   Future<void> syncFromCloud() async {
-    if (_pullInFlight) return;
+    if (_disposed || _pullInFlight) return;
     if (!_initialized || !isSignedIn) return;
+    final generation = _clientGeneration;
     _pullInFlight = true;
     try {
       final applied = await _mergeRemoteRow();
+      if (_disposed || generation != _clientGeneration) return;
       if (applied > 0) _notifyRemoteApplied();
     } catch (e) {
       if (kDebugMode) debugPrint('Cloud pull skipped (will retry): $e');
@@ -1060,7 +1420,9 @@ class CloudSyncService {
   /// has not applied yet. Returns how many local rows changed; skips all DB
   /// work when the remote row is byte-for-byte the one already merged.
   Future<int> _mergeRemoteRow() async {
+    final generation = _clientGeneration;
     final row = await fetchToday();
+    if (_disposed || generation != _clientGeneration) return 0;
     if (row == null) {
       if (kDebugMode) debugPrint('[PYLO SYNC] No daily_data row for today');
       return 0;
@@ -1086,11 +1448,13 @@ class CloudSyncService {
     // Completion states the user changed here since the last push must survive
     // this (necessarily older) remote copy.
     final keepLocal = await _pendingLocalIds();
+    if (_disposed || generation != _clientGeneration) return 0;
 
     final applied = await _applyRemoteCompletionState(
       row,
       keepLocalIds: keepLocal,
     );
+    if (_disposed || generation != _clientGeneration) return 0;
     _rememberCloudCompletions(row);
 
     // Remember what we applied even when nothing changed so the periodic
@@ -1108,6 +1472,7 @@ class CloudSyncService {
   /// Tells the app shell that SQLite changed because of remote data, so it
   /// reloads the task/checklist providers and the visible UI refreshes.
   void _notifyRemoteApplied() {
+    if (_disposed) return;
     remoteDataApplied.value = !remoteDataApplied.value;
     if (kDebugMode) debugPrint('[PYLO SYNC] Flutter state refreshed');
   }
@@ -1362,8 +1727,7 @@ class CloudSyncService {
         continue;
       }
       matchedIds++;
-      final resolved =
-          _resolveRemoteCompletion(entry.value, local.completed);
+      final resolved = _resolveRemoteCompletion(entry.value, local.completed);
       if (resolved == null) continue;
       await _dbHelper.updateChecklistItem(
         local.copyWith(completed: resolved),
@@ -1467,11 +1831,17 @@ class CloudSyncService {
   /// change. Only one channel per signed-in session exists (re-subscribing for
   /// the same user is a no-op; logout disposes it).
   void _subscribeRealtime(String userId) {
-    if (_realtimeForUserId == userId && _realtimeChannel != null) return;
-    _realtimeForUserId = userId;
+    if (_disposed ||
+        (_realtimeForUserId == userId && _realtimeChannel != null)) {
+      return;
+    }
+    final client = _clientObject;
+    final generation = _clientGeneration;
+    if (client == null) return;
     _unsubscribeRealtime();
+    _realtimeForUserId = userId;
     try {
-      _realtimeChannel = _client
+      _realtimeChannel = client
           .channel('pylo-daily-sync-$userId')
           .onPostgresChanges(
             event: PostgresChangeEvent.update,
@@ -1483,6 +1853,7 @@ class CloudSyncService {
               value: userId,
             ),
             callback: (_) {
+              if (_disposed || generation != _clientGeneration) return;
               // The event payload is deliberately NOT trusted as the source of
               // truth: what a subscriber receives depends on its RLS/column
               // access, so the row is re-read with THIS session's token by the
@@ -1493,7 +1864,10 @@ class CloudSyncService {
               schedulePull();
             },
           )
-          .subscribe(_onRealtimeStatus);
+          .subscribe((status, error) {
+        if (_disposed || generation != _clientGeneration) return;
+        _onRealtimeStatus(status, error);
+      });
     } catch (e) {
       if (kDebugMode) debugPrint('[PYLO SYNC] Realtime subscribe failed: $e');
     }
@@ -1503,6 +1877,7 @@ class CloudSyncService {
   /// "subscribed" join is what a missing realtime publication (or a failed
   /// replication setup) looks like — the periodic pull below still covers it.
   void _onRealtimeStatus(RealtimeSubscribeStatus status, Object? error) {
+    if (_disposed) return;
     // While the channel is live, skip the redundant 30 s poll; the moment it
     // drops (closed/timedOut/channelError) fall back to polling so a missed
     // event, a publication outage, or an app-suspend gap never stalls sync.
@@ -1548,6 +1923,7 @@ class CloudSyncService {
   /// Gentle periodic pull so the app still receives website changes even when
   /// the realtime publication is unavailable or an event was missed.
   void _startCloudRefreshTimer() {
+    if (_disposed) return;
     // While a live realtime subscription is actively pushing changes the 30 s
     // poll is redundant (the status listener restarts it the moment the
     // channel drops), so skip starting it again — e.g. when a fresh session
@@ -1555,7 +1931,7 @@ class CloudSyncService {
     if (_isRealtimeUp) return;
     _stopCloudRefreshTimer();
     _cloudRefreshTimer = Timer.periodic(_cloudRefreshInterval, (_) {
-      unawaited(syncFromCloud());
+      if (!_disposed) unawaited(syncFromCloud());
     });
   }
 
@@ -1565,16 +1941,19 @@ class CloudSyncService {
   }
 
   Future<void> _deleteTodayQuietly() async {
-    if (!_initialized || !isSignedIn) return;
+    if (_disposed || !_initialized || !isSignedIn) return;
     final userId = currentUserId;
-    if (userId == null) return;
+    final client = _clientObject;
+    final generation = _clientGeneration;
+    if (userId == null || client == null) return;
     try {
-      await _client
+      await client
           .from('daily_data')
           .delete()
           .eq('user_id', userId)
           .eq('data_date', localDateKey(DateTime.now()))
           .timeout(_timeout);
+      if (_disposed || generation != _clientGeneration) return;
       _resetSyncState();
     } catch (e) {
       if (kDebugMode) debugPrint('Cloud delete skipped (offline?): $e');
@@ -1640,7 +2019,8 @@ class CloudSyncService {
   Future<CloudSyncResult> _classify(Object e) async {
     final config = await _effectiveConfig();
     if (kDebugMode) {
-      debugPrint('Cloud sync error | config: ${config?.debugDescription() ?? 'not connected'}');
+      debugPrint(
+          'Cloud sync error | config: ${config?.debugDescription() ?? 'not connected'}');
       debugPrint('Cloud sync error | error: ${e.runtimeType}: $e');
     }
 
@@ -1746,8 +2126,7 @@ class CloudSyncService {
         'copy the "anon" / "public" key for this project.',
       );
     }
-    if ((message.contains('project') ||
-            message.contains('supabase')) &&
+    if ((message.contains('project') || message.contains('supabase')) &&
         (message.contains('not found') ||
             message.contains('could not be found') ||
             message.contains('does not exist'))) {
@@ -1825,13 +2204,29 @@ class CloudSyncService {
     return needles.any(text.contains);
   }
 
-  Future<void> dispose() async {
-    _syncDebounce?.cancel();
-    _authSub?.cancel();
-    _pullDebounce?.cancel();
-    _stopCloudRefreshTimer();
-    _unsubscribeRealtime();
-    await _disposeClient();
-    remoteDataApplied.dispose();
+  Future<void> dispose() {
+    final existing = _disposeFuture;
+    if (existing != null) return existing;
+    _disposed = true;
+    invalidateConnectionTest();
+    final future = _disposeResources();
+    _disposeFuture = future;
+    return future;
+  }
+
+  Future<void> _disposeResources() async {
+    final testClient = _testHttpClient;
+    _testHttpClient = null;
+    try {
+      testClient?.close();
+    } catch (_) {}
+    try {
+      await _withClientOperation(() async {
+        await _disposeClientUnlocked();
+      });
+    } finally {
+      remoteDataApplied.dispose();
+      authUser.dispose();
+    }
   }
 }

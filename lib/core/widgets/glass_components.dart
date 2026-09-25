@@ -334,7 +334,9 @@ Future<T?> showGlassBottomSheet<T>(
   return showModalBottomSheet<T>(
     context: context,
     isScrollControlled: isScrollControlled,
-    backgroundColor: Colors.transparent,
+    backgroundColor: isGlassTheme(context)
+        ? Colors.transparent
+        : Theme.of(context).bottomSheetTheme.backgroundColor,
     builder: (context) {
       if (!isGlassTheme(context)) {
         return child;

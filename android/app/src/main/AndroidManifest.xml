@@ -78,6 +78,7 @@
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED"/>
                 <action android:name="android.intent.action.QUICKBOOT_POWERON"/>
                 <action android:name="com.htc.intent.action.QUICKBOOT_POWERON"/>
+                <action android:name="com.example.task_app.ACTION_EXACT_ALARM_PERMISSION_CHANGED"/>
             </intent-filter>
         </receiver>
         <activity

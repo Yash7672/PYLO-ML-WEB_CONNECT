@@ -10,20 +10,29 @@ import 'database_provider.dart';
 class CloudAuthState {
   final String? email;
   final bool busy;
+  final bool testing;
   final bool notConfigured;
 
   const CloudAuthState({
     this.email,
     this.busy = false,
+    this.testing = false,
     this.notConfigured = false,
   });
 
   bool get isConnected => email != null;
 
-  CloudAuthState copyWith({String? email, bool? busy, bool? notConfigured}) {
+  CloudAuthState copyWith({
+    String? email,
+    bool clearEmail = false,
+    bool? busy,
+    bool? testing,
+    bool? notConfigured,
+  }) {
     return CloudAuthState(
-      email: email ?? this.email,
+      email: clearEmail ? null : email ?? this.email,
       busy: busy ?? this.busy,
+      testing: testing ?? this.testing,
       notConfigured: notConfigured ?? this.notConfigured,
     );
   }
@@ -50,14 +59,14 @@ final cloudSyncServiceProvider = Provider<CloudSyncService>((ref) {
 /// Auth state + user actions for the cloud account UI. Follows the project's
 /// existing `StateNotifier<AsyncValue<T>>` convention (see taskProvider).
 final cloudAuthProvider =
-    StateNotifierProvider<CloudAuthNotifier, AsyncValue<CloudAuthState>>(
-        (ref) {
+    StateNotifierProvider<CloudAuthNotifier, AsyncValue<CloudAuthState>>((ref) {
   final service = ref.watch(cloudSyncServiceProvider);
   return CloudAuthNotifier(service);
 });
 
 class CloudAuthNotifier extends StateNotifier<AsyncValue<CloudAuthState>> {
   final CloudSyncService service;
+  bool _disposed = false;
 
   static final RegExp _emailReg = RegExp(r'^[^\s@]+@[^\s@]+\.[^\s@]+$');
 
@@ -67,14 +76,22 @@ class CloudAuthNotifier extends StateNotifier<AsyncValue<CloudAuthState>> {
   }
 
   void _syncFromService() {
-    state = AsyncValue.data(CloudAuthState(
+    if (_disposed) return;
+    final current = state.maybeWhen(
+      data: (value) => value,
+      orElse: () => const CloudAuthState(),
+    );
+    state = AsyncValue.data(current.copyWith(
       email: service.currentEmail,
+      clearEmail: service.currentEmail == null,
       notConfigured: !service.isConfigured,
     ));
   }
 
   @override
   void dispose() {
+    if (_disposed) return;
+    _disposed = true;
     service.authUser.removeListener(_syncFromService);
     super.dispose();
   }
@@ -83,8 +100,12 @@ class CloudAuthNotifier extends StateNotifier<AsyncValue<CloudAuthState>> {
   /// and safe on every startup — if there is no session the app just stays in
   /// full offline mode. The service schedules the resume upload itself.
   Future<void> restoreSession() async {
-    await service.restoreSession();
-    _syncFromService();
+    try {
+      await service.restoreSession();
+    } catch (_) {
+    } finally {
+      _syncFromService();
+    }
   }
 
   Future<CloudSyncResult> createAccount(
@@ -93,9 +114,22 @@ class CloudAuthNotifier extends StateNotifier<AsyncValue<CloudAuthState>> {
     String confirmPassword, {
     CloudConfig? cloud,
   }) async {
-    // Every gate runs BEFORE any network call so the server is only ever
-    // touched with input that is locally valid. The service layer re-checks
-    // as a backstop.
+    if (_disposed) {
+      return const CloudSyncResult.fail(
+        CloudSyncErrorKind.notConfigured,
+        'Cloud access is unavailable.',
+      );
+    }
+    final current = state.maybeWhen(
+      data: (value) => value,
+      orElse: () => const CloudAuthState(),
+    );
+    if (current.busy || current.testing) {
+      return const CloudSyncResult.fail(
+        CloudSyncErrorKind.unknown,
+        'Wait for the current cloud action to finish.',
+      );
+    }
     if (password != confirmPassword) {
       return const CloudSyncResult.fail(
         CloudSyncErrorKind.unknown,
@@ -115,12 +149,19 @@ class CloudAuthNotifier extends StateNotifier<AsyncValue<CloudAuthState>> {
         'Password must be at least 6 characters (the Supabase minimum).',
       );
     }
-    // Offline-only account: the cloud fields were left blank, so nothing is
-    // connected. This reports an informative success WITHOUT creating any
-    // account anywhere (no local rows, no Supabase user, no persisted
-    // "signed in" state) — the app simply keeps running fully offline. A
-    // real account is only ever created by `service.signUp` on the server.
-    if (cloud == null || !cloud.isConfigured) {
+    final normalizedCloud = cloud == null
+        ? null
+        : CloudConfig(url: cloud.url, anonKey: cloud.anonKey);
+    if (normalizedCloud != null) {
+      final configError = normalizedCloud.validationError;
+      if (configError != null) {
+        return CloudSyncResult.fail(
+          CloudSyncErrorKind.invalidCredentials,
+          configError,
+        );
+      }
+    }
+    if (normalizedCloud == null) {
       return const CloudSyncResult.ok(
         'Account created in offline mode — all data stays on this device. '
         'You can connect your own Supabase project later from this screen.',
@@ -128,23 +169,80 @@ class CloudAuthNotifier extends StateNotifier<AsyncValue<CloudAuthState>> {
     }
     _setBusy(true);
     try {
-      await service.setConfig(cloud);
-      final result = await service.signUp(email, password);
+      final result = await service.createAuthorizedAccount(
+        url: normalizedCloud.url,
+        anonKey: normalizedCloud.anonKey,
+        email: normalizedEmail,
+        password: password,
+      );
       if (result.ok && service.isSignedIn) service.scheduleSync();
       return result;
     } finally {
       _setBusy(false);
+      _syncFromService();
     }
   }
 
   /// Validates the entered Project URL + anon/public key against the user's own
   /// Supabase project without saving anything. Used by the Create Account
   /// sheet's "Test" button.
-  Future<CloudSyncResult> testConnection(String url, String anonKey) {
-    return service.testConnection(url, anonKey);
+  Future<CloudSyncResult> testConnection(String url, String anonKey) async {
+    if (_disposed) {
+      return const CloudSyncResult.fail(
+        CloudSyncErrorKind.notConfigured,
+        'Cloud access is unavailable.',
+      );
+    }
+    final current = state.maybeWhen(
+      data: (value) => value,
+      orElse: () => const CloudAuthState(),
+    );
+    if (current.busy || current.testing) {
+      return const CloudSyncResult.fail(
+        CloudSyncErrorKind.unknown,
+        'Wait for the current cloud action to finish.',
+      );
+    }
+    final candidate = CloudConfig(url: url, anonKey: anonKey);
+    final configError = candidate.validationError;
+    if (configError != null) {
+      service.invalidateConnectionTest();
+      return CloudSyncResult.fail(
+        CloudSyncErrorKind.invalidCredentials,
+        configError,
+      );
+    }
+    _setTesting(true);
+    try {
+      return await service.testConnection(candidate.url, candidate.anonKey);
+    } finally {
+      _setTesting(false);
+    }
+  }
+
+  void invalidateConnectionTest() {
+    if (_disposed) return;
+    service.invalidateConnectionTest();
+  }
+
+  bool get _actionBusy {
+    if (_disposed) return true;
+    final current = state.maybeWhen(
+      data: (value) => value,
+      orElse: () => const CloudAuthState(),
+    );
+    return current.busy || current.testing;
+  }
+
+  CloudSyncResult _actionInProgress() {
+    return const CloudSyncResult.fail(
+      CloudSyncErrorKind.unknown,
+      'Wait for the current cloud action to finish.',
+    );
   }
 
   Future<CloudSyncResult> login(String email, String password) async {
+    if (_actionBusy) return _actionInProgress();
     _setBusy(true);
     try {
       final result = await service.login(email, password);
@@ -156,6 +254,7 @@ class CloudAuthNotifier extends StateNotifier<AsyncValue<CloudAuthState>> {
   }
 
   Future<CloudSyncResult> forgotPassword(String email) async {
+    if (_actionBusy) return _actionInProgress();
     _setBusy(true);
     try {
       return await service.requestRecoveryOtp(email);
@@ -168,6 +267,7 @@ class CloudAuthNotifier extends StateNotifier<AsyncValue<CloudAuthState>> {
     String email,
     String code,
   ) async {
+    if (_actionBusy) return _actionInProgress();
     _setBusy(true);
     try {
       return await service.verifyRecoveryOtp(email, code);
@@ -179,10 +279,17 @@ class CloudAuthNotifier extends StateNotifier<AsyncValue<CloudAuthState>> {
   /// Completes the OTP recovery: sets the new password on the recovery
   /// session, then signs it out so the user logs in fresh.
   Future<CloudSyncResult> setPasswordAfterRecovery(String newPassword) async {
-    return service.setPasswordAfterRecovery(newPassword);
+    if (_actionBusy) return _actionInProgress();
+    _setBusy(true);
+    try {
+      return await service.setPasswordAfterRecovery(newPassword);
+    } finally {
+      _setBusy(false);
+    }
   }
 
   Future<CloudSyncResult> logout() async {
+    if (_actionBusy) return _actionInProgress();
     _setBusy(true);
     try {
       return await service.logout();
@@ -195,6 +302,7 @@ class CloudAuthNotifier extends StateNotifier<AsyncValue<CloudAuthState>> {
     String currentPassword,
     String newPassword,
   ) async {
+    if (_actionBusy) return _actionInProgress();
     _setBusy(true);
     try {
       return await service.changePassword(currentPassword, newPassword);
@@ -207,6 +315,7 @@ class CloudAuthNotifier extends StateNotifier<AsyncValue<CloudAuthState>> {
     String newEmail,
     String currentPassword,
   ) async {
+    if (_actionBusy) return _actionInProgress();
     _setBusy(true);
     try {
       return await service.changeEmail(newEmail, currentPassword);
@@ -216,10 +325,20 @@ class CloudAuthNotifier extends StateNotifier<AsyncValue<CloudAuthState>> {
   }
 
   void _setBusy(bool value) {
+    if (_disposed) return;
     final current = state.maybeWhen(
       data: (s) => s,
       orElse: () => const CloudAuthState(),
     );
     state = AsyncValue.data(current.copyWith(busy: value));
+  }
+
+  void _setTesting(bool value) {
+    if (_disposed) return;
+    final current = state.maybeWhen(
+      data: (s) => s,
+      orElse: () => const CloudAuthState(),
+    );
+    state = AsyncValue.data(current.copyWith(testing: value));
   }
 }

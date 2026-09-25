@@ -10,6 +10,7 @@ import '../models/habit_model.dart';
 import '../models/task_model.dart';
 import '../services/home_widget_service.dart';
 import '../core/utils/notification_helper.dart';
+import '../core/utils/task_schedule.dart';
 import 'database_provider.dart';
 
 final taskProvider =
@@ -25,6 +26,8 @@ class TaskDeleteSnapshot {
   final Map<String, dynamic> taskRow;
 
   const TaskDeleteSnapshot({required this.taskRow});
+
+  String get taskId => taskRow['id']?.toString() ?? '';
 }
 
 class TaskNotifier extends StateNotifier<AsyncValue<List<Task>>> {
@@ -42,6 +45,7 @@ class TaskNotifier extends StateNotifier<AsyncValue<List<Task>>> {
   /// a delete and its undo could interleave their DB writes and their state
   /// refreshes, and a restore could be lost (task never comes back).
   Future<void>? _mutationQueue;
+  final Map<String, Future<void>> _pendingTaskCancellations = {};
 
   /// Bumped by every mutation that changes task rows. Concurrent reloads
   /// compare against it so a stale snapshot read during a write can never
@@ -53,7 +57,8 @@ class TaskNotifier extends StateNotifier<AsyncValue<List<Task>>> {
   /// result, so callers can await the true completion of their operation.
   Future<T> _runExclusive<T>(Future<T> Function() action) {
     final result = (_mutationQueue ?? Future.value()).then((_) => action());
-    _mutationQueue = result.then<void>((_) {}, onError: (Object e, StackTrace st) {});
+    _mutationQueue =
+        result.then<void>((_) {}, onError: (Object e, StackTrace st) {});
     return result;
   }
 
@@ -125,11 +130,13 @@ class TaskNotifier extends StateNotifier<AsyncValue<List<Task>>> {
 
   Future<void> addTask(Task task) async {
     await _runExclusive(() async {
+      final previousRevision = _dataRevision;
       try {
-        _dataRevision++;
         await dbHelper.createTask(task);
+        _dataRevision++;
         _updateState([..._currentTasks, task]);
       } catch (e) {
+        _dataRevision = previousRevision;
         debugPrint('Error adding task: $e');
         rethrow;
       }
@@ -139,9 +146,14 @@ class TaskNotifier extends StateNotifier<AsyncValue<List<Task>>> {
   /// Returns true when the task was persisted AND reflected in state.
   Future<bool> updateTask(Task task) async {
     return _runExclusive(() async {
+      final previousRevision = _dataRevision;
       try {
+        final result = await dbHelper.updateTask(task);
+        if (result == 0) {
+          debugPrint('Task update affected no rows for ${task.id}');
+          return false;
+        }
         _dataRevision++;
-        await dbHelper.updateTask(task);
         final tasks = _currentTasks;
         final index = tasks.indexWhere((t) => t.id == task.id);
         if (index != -1) {
@@ -151,6 +163,7 @@ class TaskNotifier extends StateNotifier<AsyncValue<List<Task>>> {
         }
         return true;
       } catch (e) {
+        _dataRevision = previousRevision;
         debugPrint('Error updating task: $e');
         return false;
       }
@@ -179,13 +192,8 @@ class TaskNotifier extends StateNotifier<AsyncValue<List<Task>>> {
         await loadTasks();
       }
     });
-    // Notification/alarm teardown is a platform-channel side effect and must
-    // never run inside the serialized mutation queue: a stalled or
-    // never-resolving cancel would freeze the queue that an Undo
-    // (restoreTask) is chained behind, silently killing every later
-    // delete/restore. Cancel asynchronously once the DB write is durable.
     if (archived) {
-      unawaited(_cancelTaskNotifications(id, reminderMinutes));
+      await _cancelTaskNotifications(id, reminderMinutes);
     }
   }
 
@@ -233,17 +241,14 @@ class TaskNotifier extends StateNotifier<AsyncValue<List<Task>>> {
         await loadTasks();
       }
     });
-    // Teardown outside the mutation queue for the same reason as archiveTask:
-    // a hung notification platform-channel call must never freeze the queue
-    // that an Undo (restoreTask) chains behind.
-    unawaited(_cancelTaskNotifications(id, reminderMinutes));
+    await _cancelTaskNotifications(id, reminderMinutes);
   }
 
   /// Swipe-delete that mirrors the Lists/Habits pattern: snapshots the task's
   /// FULL DB row (the embedded checklist is stored in that row, so capturing
   /// it captures the checklist), hard-deletes the row, and returns the
   /// snapshot so Undo can re-insert the exact row under its ORIGINAL id.
-  Future<TaskDeleteSnapshot?> deleteTaskForUndo(Task task) {
+  Future<TaskDeleteSnapshot?> deleteTaskForUndo(Task task) async {
     final id = task.id;
     // Optimistic synchronous removal so the swiped-away Dismissible leaves the
     // tree on the same frame (a Dismissible must be gone on the next frame).
@@ -254,10 +259,10 @@ class TaskNotifier extends StateNotifier<AsyncValue<List<Task>>> {
     if (index != -1) {
       _updateState(List<Task>.from(tasks)..removeAt(index));
     }
-    return _runExclusive(() async {
+    final snapshot = await _runExclusive(() async {
       try {
-        final rows = await dbHelper.queryRows('tasks',
-            where: 'id = ?', whereArgs: [id]);
+        final rows =
+            await dbHelper.queryRows('tasks', where: 'id = ?', whereArgs: [id]);
         if (rows.isEmpty) return null;
         _dataRevision++;
         await dbHelper.deleteTaskPermanently(id);
@@ -270,15 +275,19 @@ class TaskNotifier extends StateNotifier<AsyncValue<List<Task>>> {
         await loadTasks();
         return null;
       }
-    }).then((snapshot) {
-      // Notification/alarm teardown must never run inside the serialized
-      // mutation queue: a stalled platform call would freeze the queue an
-      // Undo (restoreTaskFromSnapshot) chains behind.
-      if (snapshot != null) {
-        unawaited(_cancelTaskNotifications(id, reminderMinutes));
-      }
-      return snapshot;
     });
+    if (snapshot != null) {
+      final cancellation = _cancelTaskNotifications(id, reminderMinutes);
+      _pendingTaskCancellations[id] = cancellation;
+      unawaited(
+        cancellation.whenComplete(() {
+          if (identical(_pendingTaskCancellations[id], cancellation)) {
+            _pendingTaskCancellations.remove(id);
+          }
+        }),
+      );
+    }
+    return snapshot;
   }
 
   /// Re-inserts the deleted task row under its ORIGINAL id (INSERT OR REPLACE,
@@ -322,13 +331,9 @@ class TaskNotifier extends StateNotifier<AsyncValue<List<Task>>> {
         debugPrint('Error permanently deleting task: $e');
       }
     });
-    unawaited(_cancelTaskNotifications(id, reminderMinutes));
+    await _cancelTaskNotifications(id, reminderMinutes);
   }
 
-  /// Fire-and-forget notification/alarm teardown for a task removed from the
-  /// active list. Runs OUTSIDE the mutation queue so a stalled (or never
-  /// resolving) platform channel can never freeze the queue that Undo
-  /// (restoreTask) chains behind.
   Future<void> _cancelTaskNotifications(
     String id,
     List<int>? reminderMinutes,
@@ -343,6 +348,32 @@ class TaskNotifier extends StateNotifier<AsyncValue<List<Task>>> {
     }
   }
 
+  Future<void> scheduleRestoredTaskNotifications(Task task) async {
+    final pendingCancellation = _pendingTaskCancellations[task.id];
+    if (pendingCancellation != null) {
+      await pendingCancellation;
+    }
+    final taskDateTime = TaskScheduleTimes.eventTime(
+      dueDate: task.dueDate,
+      startTime: task.startTime,
+    );
+    if (task.reminderMinutes.isNotEmpty) {
+      await NotificationHelper.scheduleTaskReminders(
+        taskId: task.id,
+        taskTitle: task.title,
+        taskDateTime: taskDateTime,
+        reminderMinutes: task.reminderMinutes,
+      );
+    }
+    if (task.alarmEnabled && task.alarmTime != null) {
+      await NotificationHelper.scheduleTaskAlarm(
+        taskId: task.id,
+        taskTitle: task.title,
+        alarmTime: task.alarmTime!,
+      );
+    }
+  }
+
   Future<void> toggleTaskCompletion(Task task,
       {bool notificationsEnabled = true}) async {
     final nowCompleted = !task.isCompleted;
@@ -351,6 +382,7 @@ class TaskNotifier extends StateNotifier<AsyncValue<List<Task>>> {
       completedAt: nowCompleted ? DateTime.now() : null,
     );
     final persisted = await updateTask(updatedTask);
+    if (!persisted) return;
 
     // A completed task must not keep firing its pending reminders.
     await NotificationHelper.cancelAllForTask(task.id,
@@ -359,9 +391,10 @@ class TaskNotifier extends StateNotifier<AsyncValue<List<Task>>> {
     if (!nowCompleted) {
       // Un-completing: put this instance's reminders and alarm back if enabled.
       if (notificationsEnabled) {
-        final taskDateTime = updatedTask.startTime ??
-            DateTime(updatedTask.dueDate.year, updatedTask.dueDate.month,
-                updatedTask.dueDate.day, 9, 0);
+        final taskDateTime = TaskScheduleTimes.eventTime(
+          dueDate: updatedTask.dueDate,
+          startTime: updatedTask.startTime,
+        );
         if (updatedTask.reminderMinutes.isNotEmpty) {
           await NotificationHelper.scheduleTaskReminders(
             taskId: updatedTask.id,
@@ -410,10 +443,10 @@ class TaskNotifier extends StateNotifier<AsyncValue<List<Task>>> {
       return;
     }
 
-try {
-        _dataRevision++;
-        await dbHelper.createTask(regenerated);
-      } catch (e) {
+    try {
+      _dataRevision++;
+      await dbHelper.createTask(regenerated);
+    } catch (e) {
       debugPrint('Error regenerating recurring task: $e');
       return;
     }
@@ -421,9 +454,10 @@ try {
 
     if (notificationsEnabled) {
       try {
-        final taskDateTime = regenerated.startTime ??
-            DateTime(regenerated.dueDate.year, regenerated.dueDate.month,
-                regenerated.dueDate.day, 9, 0);
+        final taskDateTime = TaskScheduleTimes.eventTime(
+          dueDate: regenerated.dueDate,
+          startTime: regenerated.startTime,
+        );
         if (regenerated.reminderMinutes.isNotEmpty) {
           await NotificationHelper.scheduleTaskReminders(
             taskId: regenerated.id,
@@ -457,22 +491,27 @@ try {
   /// archived, not deleted) task that has reminders. Used on startup and
   /// after the "Task reminders" master switch is turned on.
   Future<void> rescheduleAllTaskReminders() async {
-    // Ensure the task list is loaded first (dedupes the notifier's own
-    // construction-time load) so reminders are never (re)built from empty
-    // state on a cold start.
     await loadTasks();
-    // Schedule every task in parallel: zonedSchedule is a platform-channel
-    // round-trip, so a serial loop of N tasks serializes N++ round-trips at
-    // startup. Concurrent scheduling cuts that wall-clock time dramatically
-    // on devices with many reminders.
-    final tasks = _currentTasks
-        .where((t) => !t.isCompleted && !t.isArchived && !t.isDeleted)
-        .toList();
+    final tasks = _currentTasks;
     await Future.wait(tasks.map((task) async {
       try {
-        final taskDateTime = task.startTime ??
-            DateTime(task.dueDate.year, task.dueDate.month, task.dueDate.day,
-                9, 0);
+        final active = !task.isCompleted && !task.isArchived && !task.isDeleted;
+        if (!active) {
+          await NotificationHelper.cancelAllForTask(
+            task.id,
+            reminderMinutes: task.reminderMinutes,
+          );
+          return;
+        }
+
+        await NotificationHelper.cancelAllForTask(
+          task.id,
+          reminderMinutes: task.reminderMinutes,
+        );
+        final taskDateTime = TaskScheduleTimes.eventTime(
+          dueDate: task.dueDate,
+          startTime: task.startTime,
+        );
         if (task.reminderMinutes.isNotEmpty) {
           await NotificationHelper.scheduleTaskReminders(
             taskId: task.id,
@@ -481,16 +520,17 @@ try {
             reminderMinutes: task.reminderMinutes,
           );
         }
-        // Also reschedule alarm if enabled.
         if (task.alarmEnabled && task.alarmTime != null) {
           await NotificationHelper.scheduleTaskAlarm(
             taskId: task.id,
             taskTitle: task.title,
             alarmTime: task.alarmTime!,
           );
+        } else {
+          await NotificationHelper.cancelTaskAlarm(task.id);
         }
       } catch (e) {
-        debugPrint('Failed to reschedule reminders for ${task.id}: $e');
+        debugPrint('Failed to reschedule task ${task.id}: $e');
       }
     }));
   }
@@ -498,17 +538,13 @@ try {
   /// Withdraws every pending task notification. Used when the "Task
   /// reminders" master switch is turned off.
   Future<void> cancelAllTaskReminders() async {
-    final tasks = _currentTasks
-        .where((t) =>
-            !t.isCompleted &&
-            !t.isArchived &&
-            !t.isDeleted &&
-            t.reminderMinutes.isNotEmpty)
-        .toList();
+    final tasks = _currentTasks;
     await Future.wait(tasks.map((task) async {
       try {
-        await NotificationHelper.cancelAllForTask(task.id,
-            reminderMinutes: task.reminderMinutes);
+        await NotificationHelper.cancelAllForTask(
+          task.id,
+          reminderMinutes: task.reminderMinutes,
+        );
       } catch (e) {
         debugPrint('Failed to cancel reminders for ${task.id}: $e');
       }
@@ -516,6 +552,7 @@ try {
   }
 
   Future<void> clearAllTasks() async {
+    final tasks = _currentTasks;
     await _runExclusive(() async {
       try {
         _dataRevision++;
@@ -525,6 +562,10 @@ try {
         debugPrint('Error clearing tasks: $e');
       }
     });
+    await Future.wait(tasks.map((task) => NotificationHelper.cancelAllForTask(
+          task.id,
+          reminderMinutes: task.reminderMinutes,
+        )));
   }
 }
 
@@ -600,10 +641,9 @@ final filteredTaskListProvider = Provider<List<Task>>((ref) {
         task.notes.toLowerCase().contains(filterState.queryLower);
 
     final matchesFilter = switch (filterState.filter) {
-      'Today' =>
-        task.dueDate.year == now.year &&
-            task.dueDate.month == now.month &&
-            task.dueDate.day == now.day,
+      'Today' => task.dueDate.year == now.year &&
+          task.dueDate.month == now.month &&
+          task.dueDate.day == now.day,
       'Completed' => task.isCompleted,
       'Pending' => !task.isCompleted,
       'Favorites' => task.isFavorite,
@@ -619,8 +659,7 @@ final filteredTaskListProvider = Provider<List<Task>>((ref) {
 /// Tasks grouped by their local calendar date. Recomputes only when the task
 /// list changes — calendar day-taps and rebuilds read this cached map instead
 /// of re-scanning every task.
-final tasksByDayProvider =
-    Provider<Map<int, List<Task>>>((ref) {
+final tasksByDayProvider = Provider<Map<int, List<Task>>>((ref) {
   final tasks = ref.watch(allTasksProvider);
   final byDay = <int, List<Task>>{};
   for (final task in tasks) {
@@ -682,14 +721,12 @@ class CategoriesNotifier extends StateNotifier<AsyncValue<List<TaskCategory>>> {
   List<TaskCategory> get _current =>
       state.maybeWhen(data: (c) => c, orElse: () => []);
 
-  bool _nameTaken(String name, {String? exceptId}) =>
-      _current.any((c) =>
-          c.id != exceptId && c.name.toLowerCase() == name.toLowerCase());
+  bool _nameTaken(String name, {String? exceptId}) => _current.any(
+      (c) => c.id != exceptId && c.name.toLowerCase() == name.toLowerCase());
 
   /// Tasks reference categories BY NAME, so the seeded "Personal" category
   /// must stay stable — it is both the delete fallback and a user expectation.
-  static bool _isPersonal(TaskCategory c) =>
-      c.name.toLowerCase() == 'personal';
+  static bool _isPersonal(TaskCategory c) => c.name.toLowerCase() == 'personal';
 
   Future<void> addCategory(TaskCategory category) async {
     final name = category.name.trim();
@@ -822,10 +859,8 @@ String habitDateKey(DateTime date) {
 /// Per-log editable item list. autoDispose keeps notifiers for closed days
 /// from accumulating forever, and re-loads fresh from the DB each time a
 /// day's sheet is reopened (the sheet is the only writer of these rows).
-final habitLogItemsProvider = StateNotifierProvider.autoDispose.family<
-    HabitLogItemsNotifier,
-    List<HabitLogItem>,
-    String>((ref, logId) {
+final habitLogItemsProvider = StateNotifierProvider.autoDispose
+    .family<HabitLogItemsNotifier, List<HabitLogItem>, String>((ref, logId) {
   final dbHelper = ref.watch(databaseProvider);
   return HabitLogItemsNotifier(dbHelper, logId);
 });
@@ -866,7 +901,8 @@ class HabitLogItemsNotifier extends StateNotifier<List<HabitLogItem>> {
       final updated = item.copyWith(text: trimmed);
       await dbHelper.updateHabitLogItem(updated);
       state = [
-        for (final it in state) if (it.id == item.id) updated else it
+        for (final it in state)
+          if (it.id == item.id) updated else it
       ];
     } catch (e) {
       debugPrint('Error updating habit log item: $e');
@@ -932,9 +968,8 @@ final overallStatsProvider = Provider<Map<String, dynamic>>((ref) {
   final totalStreaks = habits.length;
   final longestStreak = habits.fold<int>(
     0,
-    (previousValue, habit) => habit.bestStreak > previousValue
-        ? habit.bestStreak
-        : previousValue,
+    (previousValue, habit) =>
+        habit.bestStreak > previousValue ? habit.bestStreak : previousValue,
   );
   final averageStreak = totalStreaks == 0
       ? 0.0
@@ -968,9 +1003,8 @@ final streakSummaryProvider = Provider<Map<String, dynamic>>((ref) {
       habits.where((habit) => habit.effectiveCurrentStreak() > 0).length;
   final longestStreak = habits.fold<int>(
     0,
-    (previousValue, habit) => habit.bestStreak > previousValue
-        ? habit.bestStreak
-        : previousValue,
+    (previousValue, habit) =>
+        habit.bestStreak > previousValue ? habit.bestStreak : previousValue,
   );
   final completedToday = habits.where((habit) => habit.isCompletedToday).length;
 
@@ -1062,7 +1096,8 @@ class HabitNotifier extends StateNotifier<AsyncValue<List<Habit>>> {
   void _updateState(List<Habit> habits) {
     state = AsyncValue.data(habits);
     final best = habits.fold<int>(
-        0, (max, h) => h.effectiveCurrentStreak() > max
+        0,
+        (max, h) => h.effectiveCurrentStreak() > max
             ? h.effectiveCurrentStreak()
             : max);
     HomeWidgetService.refreshHabits(best, habits: habits);
@@ -1156,8 +1191,8 @@ class HabitNotifier extends StateNotifier<AsyncValue<List<Habit>>> {
         await dbHelper.restoreRows('habits', [snapshot.habitRow]);
         await dbHelper.restoreRows('habit_logs', snapshot.logs);
         await dbHelper.restoreRows('habit_log_items', snapshot.logItems);
-        await dbHelper
-            .restoreRows('habit_completion_items', snapshot.completionItems);
+        await dbHelper.restoreRows(
+            'habit_completion_items', snapshot.completionItems);
         await loadHabits();
       } catch (e) {
         debugPrint('Error restoring habit: $e');

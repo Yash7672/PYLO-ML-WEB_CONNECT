@@ -1,41 +1,77 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
-/// Native bridge to the task-alarm pipeline held by MainActivity's
-/// `pylo/alarm` MethodChannel. The actual ringing is done entirely inside
-/// Android (AlarmManager exact alarm → AlarmActivity) so a task alarm fires
-/// and rings whether the Flutter app is open, backgrounded, or dead — it is
-/// never chained to a notification tap.
-///
-/// The global sound / vibration / snooze settings are read by the native side
-/// at ring time from the shared_preferences plugin store, so changing a
-/// pref here always affects the next ring without re-scheduling anything.
+class AlarmScheduleResult {
+  const AlarmScheduleResult({
+    required this.armed,
+    required this.exact,
+    required this.exactAccess,
+    this.error,
+  });
+
+  final bool armed;
+  final bool exact;
+  final bool exactAccess;
+  final String? error;
+
+  factory AlarmScheduleResult.fromPlatform(Object? value) {
+    if (value is bool) {
+      return AlarmScheduleResult(
+        armed: value,
+        exact: value,
+        exactAccess: value,
+      );
+    }
+    if (value is Map) {
+      return AlarmScheduleResult(
+        armed: value['armed'] == true,
+        exact: value['exact'] == true,
+        exactAccess: value['exactAccess'] == true,
+        error: value['error']?.toString(),
+      );
+    }
+    return const AlarmScheduleResult(
+      armed: false,
+      exact: false,
+      exactAccess: false,
+      error: 'Invalid native alarm response',
+    );
+  }
+}
+
 class AlarmChannel {
   AlarmChannel._();
 
   static const MethodChannel _channel = MethodChannel('pylo/alarm');
 
-  /// Arms a task alarm at [alarmTime]. Uses the deterministic
-  /// `NotificationId.taskAlarm(taskId)` request code so cancels always find
-  /// it. Returns true when a real EXACT alarm was armed (best-effort inexact
-  /// otherwise), matching the SCHEDULE_EXACT_ALARM permission state.
-  static Future<bool> schedule({
+  static Future<AlarmScheduleResult> schedule({
     required int requestCode,
     required DateTime alarmTime,
     required String taskId,
     required String taskTitle,
   }) async {
     try {
-      final exact = await _channel.invokeMethod<bool>('scheduleAlarm', {
+      final response = await _channel.invokeMethod<Object?>('scheduleAlarm', {
         'requestCode': requestCode,
         'timeMs': alarmTime.millisecondsSinceEpoch,
         'taskId': taskId,
         'title': taskTitle,
       });
-      return exact ?? false;
-    } catch (e) {
-      debugPrint('AlarmChannel.schedule failed: $e');
-      return false;
+      final result = AlarmScheduleResult.fromPlatform(response);
+      debugPrint(
+        'AlarmChannel.schedule task=$taskId requestCode=$requestCode '
+        'armed=${result.armed} exact=${result.exact} '
+        'exactAccess=${result.exactAccess} error=${result.error}',
+      );
+      return result;
+    } catch (error) {
+      debugPrint('AlarmChannel.schedule failed task=$taskId: $error');
+      return AlarmScheduleResult(
+        armed: false,
+        exact: false,
+        exactAccess: false,
+        error: error.toString(),
+      );
     }
   }
 
@@ -44,29 +80,47 @@ class AlarmChannel {
       await _channel.invokeMethod('cancelAlarm', {
         'requestCode': requestCode,
       });
-    } catch (e) {
-      debugPrint('AlarmChannel.cancel failed: $e');
+      debugPrint('AlarmChannel.cancel requestCode=$requestCode');
+    } catch (error) {
+      debugPrint('AlarmChannel.cancel failed requestCode=$requestCode: $error');
     }
   }
 
-  /// Whether Android can arm exact alarms (Android 12+ special access; always
-  /// true on older versions).
   static Future<bool> canScheduleExactAlarms() async {
     try {
-      final result = await _channel.invokeMethod<bool>('canScheduleExactAlarms');
+      final result =
+          await _channel.invokeMethod<bool>('canScheduleExactAlarms');
       return result ?? true;
-    } catch (_) {
+    } catch (error) {
+      debugPrint('AlarmChannel.canScheduleExactAlarms failed: $error');
       return true;
     }
   }
 
-  /// Opens the system "Alarms & reminders" screen so the user can grant exact
-  /// alarm access (Android 12+). No-op on older versions.
+  static Future<bool> canUseFullScreenIntent() async {
+    try {
+      final result =
+          await _channel.invokeMethod<bool>('canUseFullScreenIntent');
+      return result ?? true;
+    } catch (error) {
+      debugPrint('AlarmChannel.canUseFullScreenIntent failed: $error');
+      return true;
+    }
+  }
+
   static Future<void> openExactAlarmSettings() async {
     try {
       await _channel.invokeMethod('openExactAlarmSettings');
-    } catch (e) {
-      debugPrint('AlarmChannel.openExactAlarmSettings failed: $e');
+    } catch (error) {
+      debugPrint('AlarmChannel.openExactAlarmSettings failed: $error');
+    }
+  }
+
+  static Future<void> openFullScreenIntentSettings() async {
+    try {
+      await _channel.invokeMethod('openFullScreenIntentSettings');
+    } catch (error) {
+      debugPrint('AlarmChannel.openFullScreenIntentSettings failed: $error');
     }
   }
 }

@@ -35,8 +35,7 @@ class WebAccessSection extends ConsumerWidget {
                 child: Center(child: CircularProgressIndicator()),
               ),
               data: (s) => _content(context, ref, s),
-              orElse: () =>
-                  _content(context, ref, const CloudAuthState()),
+              orElse: () => _content(context, ref, const CloudAuthState()),
             ),
           ),
         ],
@@ -58,9 +57,10 @@ class WebAccessSection extends ConsumerWidget {
   Widget _content(BuildContext context, WidgetRef ref, CloudAuthState state) {
     final isGlass = isGlassTheme(context);
     final titleStyle = Theme.of(context).textTheme.titleMedium;
-    final subtitleStyle =
-        Theme.of(context).textTheme.bodySmall?.copyWith(
-            color: isGlass ? GlassColors.textMuted : Colors.grey[600]);
+    final subtitleStyle = Theme.of(context)
+        .textTheme
+        .bodySmall
+        ?.copyWith(color: isGlass ? GlassColors.textMuted : Colors.grey[600]);
 
     if (state.notConfigured) {
       // No user-configured project — cloud stays fully dormant but the setup
@@ -71,8 +71,7 @@ class WebAccessSection extends ConsumerWidget {
             leading: Icon(Icons.cloud_off_outlined,
                 color: isGlass ? GlassColors.textMuted : Colors.grey[600]),
             title: Text('Cloud backup off',
-                style:
-                    subtitleStyle?.copyWith(fontWeight: FontWeight.w600)),
+                style: subtitleStyle?.copyWith(fontWeight: FontWeight.w600)),
             subtitle: const Text(
                 'No Supabase project is connected, so all data stays on this '
                 'device.\nCreate an account and enter your own Project URL and '
@@ -146,9 +145,10 @@ class WebAccessSection extends ConsumerWidget {
             leading: const Icon(Icons.logout, color: Colors.redAccent),
             title: Text('Log out',
                 style: TextStyle(
-                    color: isGlass ? GlassColors.textPrimary : Colors.red[600])),
-            subtitle: const Text(
-                'TODAY\'s cloud copy is removed from the server'),
+                    color:
+                        isGlass ? GlassColors.textPrimary : Colors.red[600])),
+            subtitle:
+                const Text('TODAY\'s cloud copy is removed from the server'),
             trailing: const Icon(Icons.chevron_right),
             onTap: state.busy ? null : () => _logout(context, ref),
           ),
@@ -216,6 +216,8 @@ class WebAccessSection extends ConsumerWidget {
       cloud: CloudSetupOptions(
         onTest: (url, key) =>
             ref.read(cloudAuthProvider.notifier).testConnection(url, key),
+        onChanged: () =>
+            ref.read(cloudAuthProvider.notifier).invalidateConnectionTest(),
         onHelp: () {
           Navigator.of(context).push(
             MaterialPageRoute(
@@ -227,8 +229,9 @@ class WebAccessSection extends ConsumerWidget {
       onSubmit: (values) {
         final url = (values[CloudSetupOptions.urlKey] ?? '').trim();
         final key = (values[CloudSetupOptions.keyKey] ?? '').trim();
-        final CloudConfig? cloud =
-            (url.isEmpty && key.isEmpty) ? null : CloudConfig(url: url, anonKey: key);
+        final CloudConfig? cloud = (url.isEmpty && key.isEmpty)
+            ? null
+            : CloudConfig(url: url, anonKey: key);
         return ref.read(cloudAuthProvider.notifier).createAccount(
               values['email']!,
               values['password']!,
@@ -465,9 +468,12 @@ class WebAccessSection extends ConsumerWidget {
     final (label, color) = _resultPresentation(result);
     final text = result.message.isNotEmpty
         ? (result.ok ? result.message : '$label:\n${result.message}')
-        : (result.ok ? 'Done!' : '$label: Something went wrong. Please try again.');
+        : (result.ok
+            ? 'Done!'
+            : '$label: Something went wrong. Please try again.');
     messenger.hideCurrentSnackBar();
-    messenger.showSnackBar(SnackBar(content: Text(text), backgroundColor: color));
+    messenger
+        .showSnackBar(SnackBar(content: Text(text), backgroundColor: color));
   }
 }
 
@@ -525,10 +531,16 @@ class CloudSetupOptions {
   /// Runs the real connection + table check against the user's project.
   final Future<CloudSyncResult> Function(String url, String anonKey) onTest;
 
+  final VoidCallback? onChanged;
+
   /// Opens the step-by-step "Help me connect" screen.
   final VoidCallback onHelp;
 
-  const CloudSetupOptions({required this.onTest, required this.onHelp});
+  const CloudSetupOptions({
+    required this.onTest,
+    required this.onHelp,
+    this.onChanged,
+  });
 }
 
 /// Modal bottom-sheet form used by every WEB ACCESS action. Disposes its
@@ -563,8 +575,9 @@ class _AuthFormSheetState extends State<_AuthFormSheet> {
   bool _testBusy = false;
   String? _testMessage;
   bool _testOk = false;
-  String? _testedUrl;
-  String? _testedKey;
+  CloudConfig? _testedConfig;
+  int _testGeneration = 0;
+  int _submitGeneration = 0;
 
   Map<String, String> get _values => {
         for (final f in widget.fields) f.key: f.controller.text.trim(),
@@ -580,6 +593,18 @@ class _AuthFormSheetState extends State<_AuthFormSheet> {
     return field?.controller.text.trim() ?? '';
   }
 
+  CloudConfig get _currentCloudConfig => CloudConfig(
+        url: _cloudUrl,
+        anonKey: _cloudKey,
+      );
+
+  bool get _hasCloudConfig => _cloudUrl.isNotEmpty || _cloudKey.isNotEmpty;
+
+  bool get _cloudTestIsCurrent {
+    final tested = _testedConfig;
+    return _testOk && tested != null && tested.sameAs(_currentCloudConfig);
+  }
+
   _FormField? _field(String key) {
     for (final f in widget.fields) {
       if (f.key == key) return f;
@@ -588,95 +613,109 @@ class _AuthFormSheetState extends State<_AuthFormSheet> {
   }
 
   void _clearCloudTest() {
-    if (!_testOk && _testedUrl == null && _testMessage == null) return;
+    if (!mounted) return;
+    _testGeneration++;
+    _submitGeneration++;
+    widget.cloud?.onChanged?.call();
+    if (!_testOk && _testedConfig == null && _testMessage == null) return;
     setState(() {
       _testOk = false;
-      _testedUrl = null;
-      _testedKey = null;
+      _testedConfig = null;
       _testMessage = null;
     });
   }
 
   Future<void> _testCloud() async {
-    if (_testBusy) return;
-    final url = _cloudUrl;
-    final key = _cloudKey;
-    if (url.isEmpty || key.isEmpty) {
+    if (_testBusy || _busy) return;
+    final candidate = _currentCloudConfig;
+    final configError = candidate.validationError;
+    if (configError != null) {
+      _testGeneration++;
+      widget.cloud?.onChanged?.call();
+      if (!mounted) return;
       setState(() {
-        _testMessage =
-            'Enter both the Project URL and the anon/public key to test.';
+        _testMessage = configError;
         _testOk = false;
-        _testedUrl = null;
-        _testedKey = null;
+        _testedConfig = null;
+      });
+      return;
+    }
+    final generation = ++_testGeneration;
+    setState(() {
+      _testBusy = true;
+      _testMessage = null;
+      _error = null;
+    });
+    CloudSyncResult result;
+    try {
+      result = await widget.cloud!.onTest(candidate.url, candidate.anonKey);
+    } catch (_) {
+      result = const CloudSyncResult.fail(
+        CloudSyncErrorKind.unknown,
+        'Could not test the project connection.',
+      );
+    }
+    if (!mounted) return;
+    if (generation != _testGeneration) {
+      setState(() {
+        _testBusy = false;
+        _testOk = false;
+        _testedConfig = null;
+        _testMessage = null;
       });
       return;
     }
     setState(() {
-      _testBusy = true;
-      _testMessage = null;
-    });
-    final result = await widget.cloud!.onTest(url, key);
-    if (!mounted) return;
-    setState(() {
       _testBusy = false;
       _testOk = result.ok;
+      _testedConfig = result.ok ? candidate : null;
       _testMessage = result.message.isEmpty
           ? (result.ok ? 'Connected' : 'Could not connect.')
           : result.message;
-      _testedUrl = url;
-      _testedKey = key;
     });
   }
 
-  /// When the cloud fields are filled but the current values never passed
-  /// "Test", warn before proceeding (the user can still continue anyway).
-  /// Blank fields skip straight to a fully offline account.
-  Future<bool> _confirmUntestedCloud() async {
-    final url = _cloudUrl;
-    final key = _cloudKey;
-    if (url.isEmpty && key.isEmpty) return true;
-    if (url.isEmpty || key.isEmpty) {
-      setState(() {
-        _error = 'Enter both the Project URL and the anon/public key, or leave '
-            'both empty for a fully offline account.';
-        _errorKind = CloudSyncErrorKind.invalidCredentials;
-      });
-      return false;
-    }
-    if (_testOk && url == _testedUrl && key == _testedKey) return true;
-    final proceed = await showGlassDialog<bool>(
-      context,
-      title: 'Connection not tested',
-      content: const Text(
-          'You haven\'t tested your connection yet.\n\nContinue anyway? If the '
-          'Project URL or anon/public key is wrong, account creation will fail '
-          'with a clear message.'),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(context, false),
-          child: const Text('Go back'),
-        ),
-        FilledButton(
-          onPressed: () => Navigator.pop(context, true),
-          child: const Text('Continue anyway'),
-        ),
-      ],
-    );
-    return proceed == true && mounted;
-  }
-
   Future<void> _submit() async {
-    if (_busy) return;
-    if (widget.cloud != null) {
-      final confirmed = await _confirmUntestedCloud();
-      if (!confirmed || !mounted) return;
+    if (_busy || _testBusy) return;
+    if (widget.cloud != null && _hasCloudConfig) {
+      if (_cloudUrl.isEmpty || _cloudKey.isEmpty) {
+        setState(() {
+          _error = 'Enter both the Project URL and the anon/public key, or '
+              'leave both empty for a fully offline account.';
+          _errorKind = CloudSyncErrorKind.invalidCredentials;
+        });
+        return;
+      }
+      if (!_cloudTestIsCurrent) {
+        setState(() {
+          _error = 'Test this exact Project URL and anon/public key before '
+              'creating the account.';
+          _errorKind = CloudSyncErrorKind.invalidCredentials;
+        });
+        return;
+      }
     }
+    final generation = ++_submitGeneration;
     setState(() {
       _busy = true;
       _error = null;
     });
-    final result = await widget.onSubmit(_values);
+    CloudSyncResult result;
+    try {
+      result = await widget.onSubmit(_values);
+    } catch (_) {
+      result = const CloudSyncResult.fail(
+        CloudSyncErrorKind.unknown,
+        'Could not create the account. Please try again.',
+      );
+    }
     if (!mounted) return;
+    if (generation != _submitGeneration) {
+      setState(() {
+        _busy = false;
+      });
+      return;
+    }
     if (result.ok) {
       Navigator.pop(context, result);
       return;
@@ -710,21 +749,29 @@ class _AuthFormSheetState extends State<_AuthFormSheet> {
             ),
           ],
         ),
-        GlassInput(
-          controller: urlController,
-          labelText: 'Supabase Project URL',
-          hintText: 'https://xxxx.supabase.co',
-          prefixIcon: Icons.link_outlined,
-          keyboardType: TextInputType.url,
-          onChanged: (_) => _clearCloudTest(),
-        ),
-        const SizedBox(height: 12),
-        GlassInput(
-          controller: keyController,
-          labelText: 'Public / Anon Key',
-          hintText: 'eyJhbGciOiJIUzI1NiIs...',
-          prefixIcon: Icons.key_outlined,
-          onChanged: (_) => _clearCloudTest(),
+        AbsorbPointer(
+          absorbing: _busy || _testBusy,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              GlassInput(
+                controller: urlController,
+                labelText: 'Supabase Project URL',
+                hintText: 'https://xxxx.supabase.co',
+                prefixIcon: Icons.link_outlined,
+                keyboardType: TextInputType.url,
+                onChanged: (_) => _clearCloudTest(),
+              ),
+              const SizedBox(height: 12),
+              GlassInput(
+                controller: keyController,
+                labelText: 'Public / Anon Key',
+                hintText: 'eyJhbGciOiJIUzI1NiIs...',
+                prefixIcon: Icons.key_outlined,
+                onChanged: (_) => _clearCloudTest(),
+              ),
+            ],
+          ),
         ),
         const SizedBox(height: 12),
         Row(
@@ -732,7 +779,7 @@ class _AuthFormSheetState extends State<_AuthFormSheet> {
           children: [
             GlassButton(
               outlined: true,
-              onPressed: _testBusy ? null : _testCloud,
+              onPressed: _testBusy || _busy ? null : _testCloud,
               child: _testBusy
                   ? const SizedBox(
                       width: 18,
@@ -755,7 +802,9 @@ class _AuthFormSheetState extends State<_AuthFormSheet> {
                           fontSize: 12,
                           fontWeight: FontWeight.w500,
                           color: _testOk
-                              ? (isGlass ? Colors.lightGreenAccent : Colors.green)
+                              ? (isGlass
+                                  ? Colors.lightGreenAccent
+                                  : Colors.green)
                               : Colors.redAccent),
                     ),
             ),
@@ -785,9 +834,7 @@ class _AuthFormSheetState extends State<_AuthFormSheet> {
               Text(widget.title,
                   style: Theme.of(context).textTheme.titleLarge?.copyWith(
                       fontWeight: FontWeight.w600,
-                      color: isGlass
-                          ? GlassColors.textPrimary
-                          : null)),
+                      color: isGlass ? GlassColors.textPrimary : null)),
               const SizedBox(height: 16),
               for (final f in widget.fields)
                 if (widget.cloud == null ||
@@ -811,15 +858,15 @@ class _AuthFormSheetState extends State<_AuthFormSheet> {
               ],
               if (_error != null) ...[
                 Text(
-                  '${_resultPresentation(CloudSyncResult.fail(_errorKind)).$1}:\n$_error',
-                  style: const TextStyle(
-                      color: Colors.redAccent,
-                      fontSize: 13,
-                      fontWeight: FontWeight.w500)),
+                    '${_resultPresentation(CloudSyncResult.fail(_errorKind)).$1}:\n$_error',
+                    style: const TextStyle(
+                        color: Colors.redAccent,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w500)),
                 const SizedBox(height: 12),
               ],
               GlassButton(
-                onPressed: _busy ? null : _submit,
+                onPressed: _busy || _testBusy ? null : _submit,
                 child: _busy
                     ? SizedBox(
                         width: 20,
@@ -833,7 +880,8 @@ class _AuthFormSheetState extends State<_AuthFormSheet> {
               ),
               const SizedBox(height: 8),
               TextButton(
-                onPressed: _busy ? null : () => Navigator.pop(context),
+                onPressed:
+                    _busy || _testBusy ? null : () => Navigator.pop(context),
                 child: const Text('Cancel'),
               ),
             ],

@@ -115,6 +115,9 @@ class AppTheme {
       cardTheme: _darkTheme.cardTheme.copyWith(
         color: const Color(0xFF1E1E1E),
       ),
+      bottomSheetTheme: _darkTheme.bottomSheetTheme.copyWith(
+        backgroundColor: Colors.black,
+      ),
     );
 
     _glassTheme = _buildGlass();
@@ -136,7 +139,8 @@ class AppTheme {
       appBarTheme: AppBarTheme(
         centerTitle: true,
         elevation: 0,
-        backgroundColor: isDark ? const Color(0xFF121212) : const Color(0xFFF8F7FC),
+        backgroundColor:
+            isDark ? const Color(0xFF121212) : const Color(0xFFF8F7FC),
         foregroundColor: isDark ? Colors.white : const Color(0xFF1D1B20),
       ),
       cardTheme: CardThemeData(
@@ -145,6 +149,10 @@ class AppTheme {
         ),
         elevation: 0,
         color: isDark ? const Color(0xFF1E1E20) : Colors.white,
+        surfaceTintColor: Colors.transparent,
+      ),
+      bottomSheetTheme: BottomSheetThemeData(
+        backgroundColor: colorScheme.surface,
         surfaceTintColor: Colors.transparent,
       ),
       filledButtonTheme: FilledButtonThemeData(
@@ -187,7 +195,7 @@ class AppTheme {
   /// with three visible depth levels. Blur is applied selectively (the
   /// GlassSurface component, the floating nav), never to every widget, so the
   /// theme stays smooth on real hardware. The ColorScheme is overridden in
-  /// FULL so no default Material palette (which contains light lavender  /// containers) can leak through any component.
+  /// FULL so no default Material palette (which contains light lavender /// containers) can leak through any component.
   static ThemeData _buildGlass() {
     final baseDark = _darkTheme;
 
@@ -380,8 +388,8 @@ class AppTheme {
           }
           return GlassColors.level2;
         }),
-        trackOutlineColor: WidgetStateProperty.resolveWith(
-            (states) => Colors.transparent),
+        trackOutlineColor:
+            WidgetStateProperty.resolveWith((states) => Colors.transparent),
         trackOutlineWidth: const WidgetStatePropertyAll(0),
       ),
       checkboxTheme: CheckboxThemeData(
@@ -393,7 +401,8 @@ class AppTheme {
         }),
         checkColor: const WidgetStatePropertyAll(GlassColors.onAccent),
         side: const BorderSide(color: GlassColors.borderStrong, width: 1.5),
-        shape: const RoundedRectangleBorder(borderRadius: BorderRadius.all(Radius.circular(5))),
+        shape: const RoundedRectangleBorder(
+            borderRadius: BorderRadius.all(Radius.circular(5))),
       ),
       radioTheme: RadioThemeData(
         fillColor: WidgetStateProperty.resolveWith((states) {
@@ -451,13 +460,14 @@ class AppTheme {
       chipTheme: baseDark.chipTheme.copyWith(
         backgroundColor: GlassColors.level2,
         side: const BorderSide(color: GlassColors.borderMedium, width: 1),
-        shape: const RoundedRectangleBorder(borderRadius: BorderRadius.all(Radius.circular(12))),
+        shape: const RoundedRectangleBorder(
+            borderRadius: BorderRadius.all(Radius.circular(12))),
         labelStyle: const TextStyle(
             color: GlassColors.textSecondary, fontFamily: 'Inter'),
         selectedColor: GlassColors.accentSubtle,
         checkmarkColor: GlassColors.accent,
-        secondaryLabelStyle:
-            const TextStyle(color: GlassColors.textSecondary, fontFamily: 'Inter'),
+        secondaryLabelStyle: const TextStyle(
+            color: GlassColors.textSecondary, fontFamily: 'Inter'),
       ),
       popupMenuTheme: const PopupMenuThemeData(
         color: GlassColors.surfaceOpaqueDark,
@@ -479,13 +489,14 @@ class AppTheme {
         ),
       ),
       dropdownMenuTheme: const DropdownMenuThemeData(
-        textStyle: TextStyle(color: GlassColors.textPrimary, fontFamily: 'Inter'),
+        textStyle:
+            TextStyle(color: GlassColors.textPrimary, fontFamily: 'Inter'),
       ),
       snackBarTheme: const SnackBarThemeData(
         behavior: SnackBarBehavior.floating,
         backgroundColor: GlassColors.surfaceOpaqueDark,
-        contentTextStyle: TextStyle(
-            color: GlassColors.textPrimary, fontFamily: 'Inter'),
+        contentTextStyle:
+            TextStyle(color: GlassColors.textPrimary, fontFamily: 'Inter'),
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.all(Radius.circular(16)),
           side: BorderSide(color: GlassColors.borderMedium, width: 1),
@@ -579,8 +590,7 @@ class AppTheme {
           }
           return GlassColors.level1;
         }),
-        dayPeriodBorderSide:
-            const BorderSide(color: GlassColors.borderStrong),
+        dayPeriodBorderSide: const BorderSide(color: GlassColors.borderStrong),
         dayPeriodTextColor: WidgetStateColor.resolveWith((states) {
           if (states.contains(WidgetState.selected)) {
             return GlassColors.onAccent;
@@ -657,7 +667,8 @@ class AppTheme {
             TextButton.styleFrom(foregroundColor: GlassColors.textSecondary),
         confirmButtonStyle:
             TextButton.styleFrom(foregroundColor: GlassColors.accent),
-        yearOverlayColor: const WidgetStatePropertyAll(GlassColors.accentSubtle),
+        yearOverlayColor:
+            const WidgetStatePropertyAll(GlassColors.accentSubtle),
       ),
       extensions: const [PyloGlass()],
     );

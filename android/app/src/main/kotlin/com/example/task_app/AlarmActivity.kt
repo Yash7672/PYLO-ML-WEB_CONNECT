@@ -15,6 +15,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
@@ -80,6 +81,7 @@ class AlarmActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         readExtras()
+        clearLaunchNotification()
         configureWindow()
         createRingingChannel()
         setContentView(R.layout.activity_alarm)
@@ -375,6 +377,14 @@ class AlarmActivity : Activity() {
         }
     }
 
+    private fun clearLaunchNotification() {
+        try {
+            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            nm.cancel(AlarmReceiver.ALERT_NOTIFICATION_BASE + requestCode)
+        } catch (_: Exception) {
+        }
+    }
+
     private fun snooze() {
         if (dismissed) return
         val minutes = prefs?.getInt(AlarmScheduler.PREF_SNOOZE_MIN, 5) ?: 5
@@ -383,9 +393,13 @@ class AlarmActivity : Activity() {
             return
         }
         val at = System.currentTimeMillis() + minutes * 60_000L
-        AlarmScheduler.schedule(
+        val result = AlarmScheduler.schedule(
             this, requestCode, at, taskId, taskTitle
         )
+        if (!result.armed) {
+            Log.e("PyloAlarmActivity", "Snooze was not armed for task=$taskId: ${result.error}")
+            return
+        }
         stopRing()
     }
 

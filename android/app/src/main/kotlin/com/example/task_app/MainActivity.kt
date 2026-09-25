@@ -2,10 +2,12 @@ package com.example.task_app
 
 import android.Manifest
 import android.app.ActivityManager
+import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
+import android.provider.Settings
 import android.os.Handler
 import android.os.Looper
 import android.telecom.TelecomManager
@@ -31,6 +33,8 @@ class MainActivity : FlutterFragmentActivity() {
     private var exitedLockTaskForCall = false
     private var callActive = false
     private var flutterEngineRef: FlutterEngine? = null
+    private var exactAlarmAccessInitialized = false
+    private var hadExactAlarmAccess = false
 
     private val PHONE_STATE_PERMISSION_REQUEST = 1001
 
@@ -93,7 +97,7 @@ class MainActivity : FlutterFragmentActivity() {
                             result.success(
                                 AlarmScheduler.schedule(
                                     this, requestCode, timeMs, taskId, title
-                                )
+                                ).toMap()
                             )
                         }
                     }
@@ -109,6 +113,13 @@ class MainActivity : FlutterFragmentActivity() {
                         AlarmScheduler.openExactAlarmSettings(this)
                         result.success(true)
                     }
+                    "canUseFullScreenIntent" -> {
+                        result.success(canUseFullScreenIntent())
+                    }
+                    "openFullScreenIntentSettings" -> {
+                        openFullScreenIntentSettings()
+                        result.success(true)
+                    }
                     else -> result.notImplemented()
                 }
             }
@@ -119,6 +130,41 @@ class MainActivity : FlutterFragmentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         handleWidgetIntent(intent)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        val canScheduleExact = AlarmScheduler.canScheduleExact(this)
+        if (exactAlarmAccessInitialized && !hadExactAlarmAccess && canScheduleExact) {
+            sendBroadcast(
+                Intent(AlarmScheduler.ACTION_EXACT_ALARM_PERMISSION_CHANGED)
+                    .setPackage(packageName)
+            )
+        }
+        hadExactAlarmAccess = canScheduleExact
+        exactAlarmAccessInitialized = true
+    }
+
+    private fun canUseFullScreenIntent(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return true
+        val notificationManager =
+            getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        return notificationManager.canUseFullScreenIntent()
+    }
+
+    private fun openFullScreenIntentSettings() {
+        val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            Intent(
+                Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT,
+                android.net.Uri.parse("package:$packageName")
+            )
+        } else {
+            Intent(
+                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                android.net.Uri.parse("package:$packageName")
+            )
+        }
+        startActivity(intent)
     }
 
     override fun onDestroy() {

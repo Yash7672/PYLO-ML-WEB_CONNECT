@@ -75,7 +75,8 @@ class _TaskFlowAppState extends ConsumerState<TaskFlowApp>
     with WidgetsBindingObserver {
   /// Root navigator used to present the full-screen alarm over whatever the
   /// app currently shows (task lists, PIN lock, focus screen, …).
-  final GlobalKey<NavigatorState> _rootNavigatorKey = GlobalKey<NavigatorState>();
+  final GlobalKey<NavigatorState> _rootNavigatorKey =
+      GlobalKey<NavigatorState>();
 
   StreamSubscription<AlarmInfo>? _alarmSub;
   bool _alarmBeingPresented = false;
@@ -105,7 +106,10 @@ class _TaskFlowAppState extends ConsumerState<TaskFlowApp>
     if (listener != null) {
       // `removeListener` is a no-op when the callback was never registered,
       // so no membership check is needed on the ValueNotifier.
-      ref.read(cloudSyncServiceProvider).remoteDataApplied.removeListener(listener);
+      ref
+          .read(cloudSyncServiceProvider)
+          .remoteDataApplied
+          .removeListener(listener);
     }
     super.dispose();
   }
@@ -129,22 +133,19 @@ class _TaskFlowAppState extends ConsumerState<TaskFlowApp>
       ref.read(cloudSyncServiceProvider).schedulePull();
     }
 
-    // Only re-arm when returning from a real background interval, not the
-    // very first resume (which is handled by _initBackgroundServices).
-    if (lastResume == null) return;
-    if (now.difference(lastResume).inMinutes < 5) return;
-
-    if (kIsWeb || !mounted) return;
-    // Drain any alarm cancels the widget isolate queued while we were away,
-    // even when task reminders are switched off (the user's completion still
-    // has to stop a previously-armed alarm).
+    if (kIsWeb || !mounted || lastResume == null) return;
     unawaited(_drainPendingWidgetAlarmCancels());
     final prefs = ref.read(settingsPreferencesProvider);
-    if (!prefs.notificationsEnabled) return;
-    unawaited(ref.read(taskProvider.notifier).rescheduleAllTaskReminders()
-        .catchError((e) {
-      if (kDebugMode) debugPrint('Resume reschedule failed: $e');
-    }));
+    if (prefs.notificationsEnabled) {
+      unawaited(ref
+          .read(taskProvider.notifier)
+          .rescheduleAllTaskReminders()
+          .catchError((e) {
+        if (kDebugMode) debugPrint('Resume reschedule failed: $e');
+      }));
+    } else {
+      unawaited(ref.read(taskProvider.notifier).cancelAllTaskReminders());
+    }
   }
 
   /// Withdraws the alarms/reminders of tasks that were completed from the home
@@ -234,7 +235,8 @@ class _TaskFlowAppState extends ConsumerState<TaskFlowApp>
       // starts). Modern task alarms ring natively and never reach this path.
       final pendingAlarm = await NotificationHelper.pendingLaunchAlarm();
       if (pendingAlarm != null) {
-        debugPrint('PYLO_ColdStart presenting alarm: ${pendingAlarm.taskTitle}');
+        debugPrint(
+            'PYLO_ColdStart presenting alarm: ${pendingAlarm.taskTitle}');
         await _presentAlarm(pendingAlarm);
       } else {
         debugPrint('PYLO_ColdStart no pending alarm to present');
@@ -247,7 +249,10 @@ class _TaskFlowAppState extends ConsumerState<TaskFlowApp>
       final prefs = ref.read(settingsPreferencesProvider);
       await Future.wait([
         if (prefs.birthdayRemindersEnabled)
-          ref.read(birthdayProvider.notifier).rescheduleAllReminders().catchError((e) {
+          ref
+              .read(birthdayProvider.notifier)
+              .rescheduleAllReminders()
+              .catchError((e) {
             if (kDebugMode) debugPrint('Birthday reschedule failed: $e');
           }),
         if (prefs.notificationsEnabled)
@@ -256,7 +261,9 @@ class _TaskFlowAppState extends ConsumerState<TaskFlowApp>
               .rescheduleAllTaskReminders()
               .catchError((e) {
             if (kDebugMode) debugPrint('Task reminder reschedule failed: $e');
-          }),
+          })
+        else
+          ref.read(taskProvider.notifier).cancelAllTaskReminders(),
       ]);
 
       // Apply any alarm/reminder cancels queued by widget checkbox taps while
@@ -265,10 +272,11 @@ class _TaskFlowAppState extends ConsumerState<TaskFlowApp>
       // be mistaken for a live one.
       await _drainPendingWidgetAlarmCancels();
 
-      debugPrint('PYLO_Init milestone: initializers done (${sw.elapsedMilliseconds}ms)');
+      debugPrint(
+          'PYLO_Init milestone: initializers done (${sw.elapsedMilliseconds}ms)');
 
-      StartupBenchmark
-          .mark('notifications_initialized (${sw.elapsedMilliseconds}ms)');
+      StartupBenchmark.mark(
+          'notifications_initialized (${sw.elapsedMilliseconds}ms)');
     }
 
     if (kDebugMode) {
@@ -295,10 +303,10 @@ class _TaskFlowAppState extends ConsumerState<TaskFlowApp>
       // Watch the local providers so every task / checklist mutation schedules
       // a (debounced) upload of today's cloud snapshot. SQLite stays the
       // source of truth; this listener only mirrors changes to the cloud.
-      ref.listenManual(taskProvider,
-          (previous, next) => service.scheduleSync());
-      ref.listenManual(checklistProvider,
-          (previous, next) => service.scheduleSync());
+      ref.listenManual(
+          taskProvider, (previous, next) => service.scheduleSync());
+      ref.listenManual(
+          checklistProvider, (previous, next) => service.scheduleSync());
 
       // When the pull merges a website completion change into SQLite, reload
       // the providers so the visible UI reflects the new state immediately.
@@ -307,8 +315,22 @@ class _TaskFlowAppState extends ConsumerState<TaskFlowApp>
       }
       _remoteDataListener = () {
         if (!mounted) return;
-        ref.read(taskProvider.notifier).loadTasks();
-        ref.read(checklistProvider.notifier).loadChecklists();
+        unawaited(() async {
+          await ref.read(taskProvider.notifier).loadTasks();
+          if (!mounted) return;
+          final prefs = ref.read(settingsPreferencesProvider);
+          if (prefs.notificationsEnabled) {
+            await ref.read(taskProvider.notifier).rescheduleAllTaskReminders();
+          } else {
+            await ref.read(taskProvider.notifier).cancelAllTaskReminders();
+          }
+          ref.read(checklistProvider.notifier).loadChecklists();
+        }()
+            .catchError((error) {
+          if (kDebugMode) {
+            debugPrint('Remote task reconciliation failed: $error');
+          }
+        }));
       };
       service.remoteDataApplied.addListener(_remoteDataListener!);
     } catch (e) {
