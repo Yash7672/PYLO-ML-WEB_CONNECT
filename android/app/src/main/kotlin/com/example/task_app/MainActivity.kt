@@ -120,6 +120,13 @@ class MainActivity : FlutterFragmentActivity() {
                         openFullScreenIntentSettings()
                         result.success(true)
                     }
+                    "canDrawOverlays" -> {
+                        result.success(Settings.canDrawOverlays(this))
+                    }
+                    "openOverlaySettings" -> {
+                        openOverlaySettings()
+                        result.success(true)
+                    }
                     else -> result.notImplemented()
                 }
             }
@@ -165,6 +172,30 @@ class MainActivity : FlutterFragmentActivity() {
             )
         }
         startActivity(intent)
+    }
+
+    /// Opens the "Display over other apps" special-access screen. Granting it
+    /// is what lets AlarmReceiver launch the full-screen AlarmActivity the
+    /// moment an alarm fires, even when the app process is dead.
+    private fun openOverlaySettings() {
+        try {
+            startActivity(
+                Intent(
+                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    android.net.Uri.parse("package:$packageName")
+                ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+        } catch (error: Exception) {
+            try {
+                startActivity(
+                    Intent(
+                        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        android.net.Uri.parse("package:$packageName")
+                    ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                )
+            } catch (_: Exception) {
+            }
+        }
     }
 
     override fun onDestroy() {

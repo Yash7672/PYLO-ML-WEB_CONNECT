@@ -1,6 +1,6 @@
 /// SQL the user runs in their OWN Supabase project's SQL Editor to prepare it
 /// for PYLO cloud sync. Shown on the Cloud Setup help screen as three separate,
-/// labelled, copyable blocks (Step 5 / Step 6 / Step 7), each idempotent so a
+/// labelled, copyable blocks (Step 6 / Step 7 / Step 8), each idempotent so a
 /// re-run never breaks.
 ///
 /// The column shapes are generated from the app's ACTUAL data usage — see
@@ -10,9 +10,9 @@
 /// so RLS + the auto-create trigger + future web features have a home).
 library;
 
-/// Step 5 — the per-user profile table.
+/// Step 6 — the per-user profile table.
 const String createProfilesTableSql = r'''
--- (5) Create profiles table
+-- (6) Create profiles table
 create table if not exists public.profiles (
   id uuid primary key references auth.users (id) on delete cascade,
   email text,
@@ -23,10 +23,10 @@ create table if not exists public.profiles (
 );
 ''';
 
-/// Step 6 — one row per (user, local calendar date). `UNIQUE(user_id,
+/// Step 7 — one row per (user, local calendar date). `UNIQUE(user_id,
 /// data_date)` is the conflict target the app uses for its upserts.
 const String createDailyDataTableSql = r'''
--- (6) Create daily_data table
+-- (7) Create daily_data table
 create table if not exists public.daily_data (
   id uuid primary key,
   user_id uuid not null references auth.users (id) on delete cascade,
@@ -39,10 +39,10 @@ create table if not exists public.daily_data (
 );
 ''';
 
-/// Step 7 — row-level security + ownership policies, the signup profile
-/// trigger and the realtime publication. Runs AFTER steps 5 and 6.
+/// Step 8 — row-level security + ownership policies, the signup profile
+/// trigger and the realtime publication. Runs AFTER steps 6 and 7.
 const String enableRlsAndPoliciesSql = r'''
--- (7) Enable RLS + policies
+-- (8) Enable RLS + policies
 alter table public.profiles enable row level security;
 alter table public.daily_data enable row level security;
 

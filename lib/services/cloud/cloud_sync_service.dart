@@ -232,6 +232,29 @@ class CloudSyncService {
     }
   }
 
+  /// Auth options for every project-scoped [SupabaseClient] this service
+  /// builds.
+  ///
+  /// `Supabase.initialize` is the only place `supabase_flutter` injects
+  /// `pkceAsyncStorage`, and this service deliberately does not use
+  /// `initialize` (it is one-shot, which would make switching projects
+  /// impossible). A bare `FlutterAuthClientOptions()` therefore leaves
+  /// `pkceAsyncStorage` null while `authFlowType` still defaults to
+  /// `AuthFlowType.pkce` — and `GoTrueClient.signUp()` unconditionally calls
+  /// `_generatePKCECodeChallenge()`, which dereferences that null storage
+  /// (`assert(_asyncStorage != null, 'You need to provide asyncStorage to
+  /// perform pkce flow.')` in debug, a null-check `TypeError` in release). It
+  /// fails locally, before any HTTP request reaches Supabase.
+  ///
+  /// That is why "Create Account" always reported a generic cloud server error
+  /// while "Login" kept working: `signInWithPassword` never touches the PKCE
+  /// verifier. The defaults are replicated here exactly as
+  /// `Supabase.initialize` sets them.
+  @visibleForTesting
+  static FlutterAuthClientOptions buildAuthOptions() => FlutterAuthClientOptions(
+        pkceAsyncStorage: SharedPreferencesGotrueAsyncStorage(),
+      );
+
   /// Builds (or rebuilds) the standalone client for [config].
   ///
   /// `Supabase.initialize()` is deliberately NOT used: it is one-shot (a second
@@ -241,6 +264,10 @@ class CloudSyncService {
   /// normally does it only exists for `Supabase.initialize`): the same JSON
   /// format is stored under the same per-project key scheme, and restored with
   /// `recoverSession` on every build.
+  ///
+  /// Because the client is built without `Supabase.initialize`, the auth
+  /// defaults that `initialize` injects must be replicated here — see
+  /// [buildAuthOptions].
   Future<void> _buildClientUnlocked(CloudConfig config) async {
     await _disposeClientUnlocked();
     final storage = SharedPreferencesLocalStorage(
@@ -253,7 +280,7 @@ class CloudSyncService {
     final client = SupabaseClient(
       config.url,
       config.anonKey,
-      authOptions: const FlutterAuthClientOptions(),
+      authOptions: buildAuthOptions(),
     );
     if (_disposed) {
       await client.dispose();
@@ -735,7 +762,7 @@ class CloudSyncService {
       if (dailyData.statusCode < 200 || dailyData.statusCode >= 300) {
         return _tablesNotReady(
           dailyData,
-          step: 'Step 6 (daily_data)',
+          step: 'Step 7 (daily_data)',
         );
       }
 
@@ -752,7 +779,7 @@ class CloudSyncService {
       if (profiles.statusCode < 200 || profiles.statusCode >= 300) {
         return _tablesNotReady(
           profiles,
-          step: 'Step 5 (profiles)',
+          step: 'Step 6 (profiles)',
         );
       }
       return null;
@@ -873,9 +900,15 @@ class CloudSyncService {
 
       final client = _clientObject;
       if (client == null) return _notConfigured();
+      _signUpDebugLog('createAuthorizedAccount: calling auth.signUp',
+          'email: $normalizedEmail'); // email only — never the password.
       final res = await client.auth
           .signUp(email: normalizedEmail, password: password)
           .timeout(_timeout);
+      _signUpDebugLog(
+          'createAuthorizedAccount: signUp returned',
+          'user: ${res.user != null ? 'present' : 'null'} | '
+              'session: ${res.session != null ? 'present' : 'null'}');
       if (_disposed) return _notConfigured();
       if (!_authorizationIsCurrent(candidate, authorizationGeneration)) {
         return _connectionTestRequired();
@@ -885,12 +918,18 @@ class CloudSyncService {
         scheduleSync();
         return const CloudSyncResult.ok();
       }
+      _signUpDebugLog(
+          'createAuthorizedAccount: no session returned',
+          'user: ${res.user != null ? 'present' : 'null'} | '
+              'email confirmation required?');
       return const CloudSyncResult.ok(
         'Account created. Check your inbox to confirm your email address '
         'before logging in.',
       );
     } catch (e) {
       if (_disposed) return _notConfigured();
+      _signUpDebugLog(
+          'createAuthorizedAccount: signUp THREW', _describeAuthException(e));
       return _classify(e);
     } finally {
       _configInFlight = false;
@@ -931,9 +970,15 @@ class CloudSyncService {
       return _connectionTestRequired();
     }
     try {
+      _signUpDebugLog(
+          'signUp: calling auth.signUp', 'email: $normalized'); // never password
       final res = await _auth
           .signUp(email: normalized, password: password)
           .timeout(_timeout);
+      _signUpDebugLog(
+          'signUp: signUp returned',
+          'user: ${res.user != null ? 'present' : 'null'} | '
+              'session: ${res.session != null ? 'present' : 'null'}');
       if (res.session != null) {
         authUser.value = res.session?.user;
         scheduleSync();
@@ -942,11 +987,16 @@ class CloudSyncService {
       // No session returned: email confirmation is enabled on the project.
       // The UI must not show "connected" (there is no session yet) and the
       // user just needs to verify their inbox.
+      _signUpDebugLog(
+          'signUp: no session returned',
+          'user: ${res.user != null ? 'present' : 'null'} | '
+              'email confirmation required?');
       return const CloudSyncResult.ok(
         'Account created. Check your inbox to confirm your email address '
         'before logging in.',
       );
     } catch (e) {
+      _signUpDebugLog('signUp: signUp THREW', _describeAuthException(e));
       return _classify(e);
     }
   }
@@ -1960,6 +2010,46 @@ class CloudSyncService {
     }
   }
 
+  // ── DEBUG signup diagnostics (temporary) ──────────────────────────
+  //
+  // All lines carry the `[PYLO SIGNUP]` prefix so they are visible with a
+  // plain `adb logcat | grep PYLO` filter. Debug builds only; they log
+  // exception TYPE / message / status / code and whether a user/session came
+  // back — never the password, tokens, keys or any other secret.
+
+  /// Logs one stage of the signup flow in debug builds. The [detail] must
+  /// already be secret-free (use [_describeAuthException] / [_redact]).
+  static void _signUpDebugLog(String stage, [String detail = '']) {
+    if (!kDebugMode) return;
+    debugPrint('[PYLO SIGNUP] $stage${detail.isEmpty ? '' : ' | $detail'}');
+  }
+
+  /// Secret-free, single-line description of a thrown error for the signup
+  /// diagnostics: exception type, message (redacted), HTTP status and the
+  /// Supabase error code when the exception carries them. Never includes
+  /// credentials, tokens or keys.
+  static String _describeAuthException(Object e) {
+    var description = '${e.runtimeType}: ${_redact(e.toString())}';
+    if (e is AuthException) {
+      final message = _redact(e.message);
+      description = '${e.runtimeType} | message: $message'
+          '${e.statusCode == null ? '' : ' | status: ${e.statusCode}'}'
+          '${e.code == null ? '' : ' | code: ${e.code}'}';
+      if (e is AuthUnknownException) {
+        final original = e.originalError;
+        if (original is http.Response) {
+          description += ' | body: ${_redact(original.body)}';
+        }
+      }
+    }
+    return description;
+  }
+
+  /// Public façade over [_describeAuthException] for the auth UI sheets: lets
+  /// an exception that escaped the service layer be logged (and, temporarily,
+  /// shown) without ever echoing keys, tokens or the password.
+  static String describeAuthError(Object e) => _describeAuthException(e);
+
   // ── Helpers ───────────────────────────────────────────────────────────
 
   static String _hashPayload(String dateKey, DailyCloudData data) {
@@ -2019,40 +2109,17 @@ class CloudSyncService {
   Future<CloudSyncResult> _classify(Object e) async {
     final config = await _effectiveConfig();
     if (kDebugMode) {
-      debugPrint(
-          'Cloud sync error | config: ${config?.debugDescription() ?? 'not connected'}');
-      debugPrint('Cloud sync error | error: ${e.runtimeType}: $e');
+      // [PYLO SIGNUP] prefix so signup failures are visible under a plain
+      // `adb logcat | grep PYLO` filter alongside the flow-level logs above.
+      _signUpDebugLog('classify: resolved config',
+          config?.debugDescription() ?? 'not connected');
+      _signUpDebugLog(
+          'classify: raw error (type + message only, no secrets)',
+          _describeAuthException(e));
     }
 
-    if (e is AuthException) {
-      final serverIssue = _mapServerAuthError(e);
-      if (serverIssue != null) return serverIssue;
-      // gotrue decoded an actual HTTP response (401/400/422/5xx…): the request
-      // reached Supabase, so this is a cloud/auth error, never connectivity.
-      if (e.statusCode != null) {
-        return CloudSyncResult.fail(
-          CloudSyncErrorKind.server,
-          'Supabase server responded with HTTP ${e.statusCode}'
-          '${e.code != null ? ' (${e.code})' : ''}. ${_serverHint(e.statusCode!)}',
-        );
-      }
-    }
-
-    final text = e.toString().toLowerCase();
-    final name = e.runtimeType.toString().toLowerCase();
-    final networkShaped = name.contains('socketexception') ||
-        name.contains('clientexception') ||
-        name.contains('timeoutexception') ||
-        name.contains('httpexception') ||
-        name.contains('authretryablefetchexception') ||
-        _isNetworkText(text);
-
-    if (!networkShaped) {
-      return const CloudSyncResult.fail(
-        CloudSyncErrorKind.server,
-        'The cloud server could not complete the request. Please try again.',
-      );
-    }
+    final decided = classifyWithoutProbe(e);
+    if (decided != null) return decided;
 
     final baseUri = config?.baseUri;
     if (baseUri == null) {
@@ -2067,34 +2134,104 @@ class CloudSyncService {
       baseUri,
       timeout: _probeTimeout,
     );
+    // TEMPORARY debug detail: append the redacted raw error so the real cause
+    // (e.g. a TimeoutException behind a "busy server" verdict) is visible in
+    // the UI and logcat instead of only the canned sentence. Stripped from
+    // release builds.
+    final debugDetail = kDebugMode ? '\n[debug] ${_redact(e.toString())}' : '';
     switch (probe.status) {
       case net_probe.HostReachability.noInternet:
         return CloudSyncResult.fail(
           CloudSyncErrorKind.network,
-          probe.detail,
+          '${probe.detail}$debugDetail',
         );
       case net_probe.HostReachability.cloudUnreachable:
         return CloudSyncResult.fail(
           CloudSyncErrorKind.network,
-          probe.detail,
+          '${probe.detail}$debugDetail',
         );
       case net_probe.HostReachability.tlsIssue:
         return CloudSyncResult.fail(
           CloudSyncErrorKind.server,
-          probe.detail,
+          '${probe.detail}$debugDetail',
         );
       case net_probe.HostReachability.reachable:
-        return const CloudSyncResult.fail(
+        return CloudSyncResult.fail(
           CloudSyncErrorKind.server,
           'Supabase is reachable but could not complete the request just now. '
-          'It may be temporarily busy — please try again in a moment.',
+          'It may be temporarily busy — please try again in a moment.'
+          '$debugDetail',
         );
       case net_probe.HostReachability.unknown:
-        return const CloudSyncResult.fail(
+        return CloudSyncResult.fail(
           CloudSyncErrorKind.server,
-          'Could not verify the connection. Please try again.',
+          'Could not verify the connection. Please try again.'
+          '$debugDetail',
         );
     }
+  }
+
+  /// The half of [_classify] that needs no network probe: everything the
+  /// device can decide on its own, i.e. the request either demonstrably
+  /// reached Supabase (or demonstrably never left the device).
+  ///
+  /// Returns null when the error is connection-shaped and the DNS→TCP→TLS
+  /// probe has to decide between "no internet" and "cloud unreachable".
+  @visibleForTesting
+  static CloudSyncResult? classifyWithoutProbe(Object e) {
+    if (e is AuthException) {
+      final serverIssue = _mapServerAuthError(e);
+      if (serverIssue != null) return serverIssue;
+      // gotrue decoded an actual HTTP response (401/400/422/5xx…): the request
+      // reached Supabase, so this is a cloud/auth error, never connectivity.
+      if (e.statusCode != null) {
+        return CloudSyncResult.fail(
+          CloudSyncErrorKind.server,
+          'Supabase server responded with HTTP ${e.statusCode}'
+          '${e.code != null ? ' (${e.code})' : ''}'
+          '${e.message.isEmpty ? '' : ': ${_redact(e.message)}'}. '
+          '${_serverHint(e.statusCode!)}',
+        );
+      }
+      // No HTTP status. `AuthRetryableFetchException` is gotrue's explicit
+      // "the request never completed" wrapper (it carries no code at all), so it
+      // stays connection-shaped and falls through to the reachability probe.
+      // Any OTHER status-less AuthException is a local gotrue fault — e.g.
+      // "Code verifier could not be found in local storage." — where the
+      // message is the only useful signal there is. Report it instead of
+      // collapsing it into a generic server failure.
+      if (e is! AuthRetryableFetchException) {
+        return CloudSyncResult.fail(
+          CloudSyncErrorKind.server,
+          'Supabase could not complete the request: ${_redact(e.message)}',
+        );
+      }
+    }
+
+    if (!_isNetworkShaped(e)) {
+      // Neither a transport failure nor a Supabase Auth error: a local fault
+      // (missing PKCE verifier storage, an uninitialised client, a package
+      // assertion, a malformed response). The old code threw every one of
+      // these away behind one opaque sentence — which is exactly how an
+      // entirely local Create Account failure ended up reported as a cloud
+      // outage. Show the real cause instead (credentials redacted).
+      return CloudSyncResult.fail(
+        CloudSyncErrorKind.server,
+        'The app could not complete the cloud request: ${_redact(e.toString())}',
+      );
+    }
+    return null;
+  }
+
+  static bool _isNetworkShaped(Object e) {
+    final text = e.toString().toLowerCase();
+    final name = e.runtimeType.toString().toLowerCase();
+    return name.contains('socketexception') ||
+        name.contains('clientexception') ||
+        name.contains('timeoutexception') ||
+        name.contains('httpexception') ||
+        name.contains('authretryablefetchexception') ||
+        _isNetworkText(text);
   }
 
   static String _serverHint(String status) {
@@ -2114,10 +2251,26 @@ class CloudSyncService {
 
   /// Maps errors that PROVE the server answered. Non-null result means the
   /// device definitely had connectivity — never a "no internet" report.
-  CloudSyncResult? _mapServerAuthError(AuthException e) {
+  static CloudSyncResult? _mapServerAuthError(AuthException e) {
     final code = (e.code ?? '').toLowerCase();
     final message = e.message.toLowerCase();
 
+    // gotrue wraps any response it cannot decode (empty body, non-JSON HTML
+    // from a proxy/CDN, a project whose Auth API is disabled) in this. It did
+    // reach Supabase, so report what actually came back instead of guessing.
+    if (e is AuthUnknownException) {
+      final original = e.originalError;
+      final status = original is http.Response
+          ? original.statusCode.toString()
+          : e.statusCode;
+      return CloudSyncResult.fail(
+        CloudSyncErrorKind.server,
+        'Supabase returned an unexpected response'
+        '${status == null ? '' : ' (HTTP $status)'}: ${_redact(e.message)} '
+        'Check the Project URL and that the Auth API is enabled for this '
+        'project.',
+      );
+    }
     if (code.contains('invalid_api_key') ||
         message.contains('invalid api key')) {
       return const CloudSyncResult.fail(
@@ -2202,6 +2355,28 @@ class CloudSyncService {
       'broken pipe',
     ];
     return needles.any(text.contains);
+  }
+
+  /// Strips anything key-shaped out of a raw error string before it is shown
+  /// to a user. Exception text is echoed verbatim, and a Supabase/gotrue error
+  /// can carry request material, so the anon / publishable / secret key and
+  /// any JWT are replaced with a placeholder. The user always has the key in
+  /// the Create Account form, so nothing useful is lost.
+  static String _redact(String raw) {
+    var text = raw.replaceAll(RegExp(r'sb_(?:secret|publishable)_[A-Za-z0-9_-]+'),
+        '[redacted key]');
+    text = text.replaceAll(
+      RegExp(r'\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*'),
+      '[redacted key]',
+    );
+    text = text.replaceAll(
+      RegExp(
+        r'(apikey|authorization|bearer)\s*[:=]?\s*\S+',
+        caseSensitive: false,
+      ),
+      r'$1: [redacted key]',
+    );
+    return text.trim();
   }
 
   Future<void> dispose() {

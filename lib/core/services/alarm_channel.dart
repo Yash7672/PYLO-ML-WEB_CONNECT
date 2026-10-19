@@ -123,4 +123,25 @@ class AlarmChannel {
       debugPrint('AlarmChannel.openFullScreenIntentSettings failed: $error');
     }
   }
+
+  /// Whether "Display over other apps" is granted.  With it, an alarm can
+  /// launch the full-screen AlarmActivity the instant it fires — even when
+  /// the app is closed and the screen is on and unlocked.
+  static Future<bool> canDrawOverlays() async {
+    try {
+      final result = await _channel.invokeMethod<bool>('canDrawOverlays');
+      return result ?? false;
+    } catch (error) {
+      debugPrint('AlarmChannel.canDrawOverlays failed: $error');
+      return false;
+    }
+  }
+
+  static Future<void> openOverlaySettings() async {
+    try {
+      await _channel.invokeMethod('openOverlaySettings');
+    } catch (error) {
+      debugPrint('AlarmChannel.openOverlaySettings failed: $error');
+    }
+  }
 }

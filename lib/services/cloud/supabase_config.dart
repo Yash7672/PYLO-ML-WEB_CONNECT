@@ -30,7 +30,7 @@ class SupabaseConfig {
   /// made the app dial a non-existent hostname (the "DNS lookup failed"
   /// false alarm). Never construct this from the project ID and never append
   /// /rest/v1 to it — the SDK adds API sub-paths itself.
-  static const String url = 'https://jfeunxepvrpixktharxk.supabase.co';
+  static const String url = 'https://mcattgqgnyemoxrxysnr.supabase.co';
 
   static const String anonKey =
       String.fromEnvironment('SUPABASE_ANON_KEY', defaultValue: '');
@@ -62,7 +62,8 @@ class SupabaseConfig {
   /// wrong/typo'd/stale hostname is visible at a glance. It prints the key's
   /// LENGTH only, never the key itself.
   static String debugDescription() {
-    if (!isConfigured) return 'not configured (key=${anonKey.isEmpty ? 'empty' : 'set'})';
+    if (!isConfigured)
+      return 'not configured (key=${anonKey.isEmpty ? 'empty' : 'set'})';
     return 'url=$url anonKeyLength=${anonKey.length}';
   }
 }

@@ -974,6 +974,20 @@ class NotificationHelper {
     if (kIsWeb) return;
     await AlarmChannel.openFullScreenIntentSettings();
   }
+
+  /// Whether "Display over other apps" is granted (Android 6+; false means
+  /// alarms fall back to the full-screen notification, which the system only
+  /// expands on a locked/off screen).
+  static Future<bool> canDrawOverlays() async {
+    if (kIsWeb) return true;
+    return AlarmChannel.canDrawOverlays();
+  }
+
+  /// Opens the system "Display over other apps" screen for this app.
+  static Future<void> openOverlaySettings() async {
+    if (kIsWeb) return;
+    await AlarmChannel.openOverlaySettings();
+  }
 }
 
 class FocusNotificationIds {

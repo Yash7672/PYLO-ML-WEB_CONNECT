@@ -9,6 +9,11 @@
     <!-- Full-screen alarm alerts (Android 12+ special access, requested at
          runtime via requestFullScreenIntentPermission()). -->
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT"/>
+    <!-- Lets AlarmReceiver launch the full-screen AlarmActivity directly at
+         the moment an alarm fires — even when the app process is dead and the
+         screen is on/unlocked (Android 10+ blocks background activity starts
+         without this "Display over other apps" special access). -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.USE_BIOMETRIC"/>

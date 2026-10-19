@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -570,7 +571,6 @@ class _AuthFormSheet extends StatefulWidget {
 class _AuthFormSheetState extends State<_AuthFormSheet> {
   bool _busy = false;
   String? _error;
-  CloudSyncErrorKind _errorKind = CloudSyncErrorKind.unknown;
 
   bool _testBusy = false;
   String? _testMessage;
@@ -682,7 +682,6 @@ class _AuthFormSheetState extends State<_AuthFormSheet> {
         setState(() {
           _error = 'Enter both the Project URL and the anon/public key, or '
               'leave both empty for a fully offline account.';
-          _errorKind = CloudSyncErrorKind.invalidCredentials;
         });
         return;
       }
@@ -690,7 +689,6 @@ class _AuthFormSheetState extends State<_AuthFormSheet> {
         setState(() {
           _error = 'Test this exact Project URL and anon/public key before '
               'creating the account.';
-          _errorKind = CloudSyncErrorKind.invalidCredentials;
         });
         return;
       }
@@ -703,10 +701,19 @@ class _AuthFormSheetState extends State<_AuthFormSheet> {
     CloudSyncResult result;
     try {
       result = await widget.onSubmit(_values);
-    } catch (_) {
-      result = const CloudSyncResult.fail(
+    } catch (e, st) {
+      // TEMPORARY debugging aid: never let the actual exception vanish behind
+      // a generic sentence. Logged debug-only via the safe describer; nothing
+      // secret (password, tokens, keys) is ever included.
+      if (kDebugMode) {
+        debugPrint('[PYLO SIGNUP] UI: submit threw outside the service '
+            '| ${CloudSyncService.describeAuthError(e)}');
+        debugPrint('[PYLO SIGNUP] UI: stackTrace: $st');
+      }
+      result = CloudSyncResult.fail(
         CloudSyncErrorKind.unknown,
-        'Could not create the account. Please try again.',
+        'Could not create the account. Please try again. '
+            '[debug] ${CloudSyncService.describeAuthError(e)}',
       );
     }
     if (!mounted) return;
@@ -720,10 +727,17 @@ class _AuthFormSheetState extends State<_AuthFormSheet> {
       Navigator.pop(context, result);
       return;
     }
+    // TEMPORARY debugging aid: the service already returns the real, redacted
+    // Supabase error in its message. Log it (never secrets) so `adb logcat`
+    // keeps a copy even if the sheet is closed, and show it verbatim instead
+    // of hiding it behind the generic headline.
+    if (kDebugMode) {
+      debugPrint('[PYLO SIGNUP] UI: submit failed (${result.error.name}) '
+          '| detail: ${result.message}');
+    }
     setState(() {
       _busy = false;
       _error = result.message;
-      _errorKind = result.error;
     });
   }
 
@@ -858,7 +872,7 @@ class _AuthFormSheetState extends State<_AuthFormSheet> {
               ],
               if (_error != null) ...[
                 Text(
-                    '${_resultPresentation(CloudSyncResult.fail(_errorKind)).$1}:\n$_error',
+                    '$_error',
                     style: const TextStyle(
                         color: Colors.redAccent,
                         fontSize: 13,

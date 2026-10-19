@@ -7,6 +7,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import android.provider.Settings
 import android.util.Log
 import androidx.core.app.NotificationCompat
 
@@ -62,6 +63,9 @@ class AlarmReceiver : BroadcastReceiver() {
                     lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
                     setSound(null, null)
                     enableVibration(false)
+                    // Alarms must cut through Do Not Disturb like a real alarm
+                    // clock would.
+                    setBypassDnd(true)
                 }
             )
         }
@@ -79,10 +83,31 @@ class AlarmReceiver : BroadcastReceiver() {
             .build()
         notificationManager.notify(ALERT_NOTIFICATION_BASE + requestCode, notification)
 
+        // Direct launch is what makes the alarm take over the full screen the
+        // instant it fires — including with the app closed and the screen on
+        // and unlocked, where the full-screen intent above would degrade to a
+        // heads-up notification. Android 10+ only allows this background
+        // activity start while "Display over other apps" is granted.
+        val overlayGranted = Settings.canDrawOverlays(context)
+        val fsiGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            notificationManager.canUseFullScreenIntent()
+        } else {
+            true
+        }
+        Log.i(
+            "PyloAlarmReceiver",
+            "Launching AlarmActivity task=$taskId " +
+                "overlayGranted=$overlayGranted fsiGranted=$fsiGranted"
+        )
         try {
             context.startActivity(showIntent)
         } catch (error: Exception) {
-            Log.w("PyloAlarmReceiver", "Direct alarm launch failed; full-screen notification remains", error)
+            Log.w(
+                "PyloAlarmReceiver",
+                "Direct alarm launch failed (overlayGranted=$overlayGranted); " +
+                    "full-screen notification remains as fallback",
+                error
+            )
         }
     }
 

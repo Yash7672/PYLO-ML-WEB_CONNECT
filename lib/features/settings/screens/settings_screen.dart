@@ -385,6 +385,7 @@ class SettingsScreen extends ConsumerWidget {
                 ),
                 const _ExactAlarmAccessTile(),
                 const _FullScreenAccessTile(),
+                const _OverlayAccessTile(),
               ],
             ),
           ),
@@ -1239,6 +1240,68 @@ class _FullScreenAccessTileState extends ConsumerState<_FullScreenAccessTile>
       trailing: const Icon(Icons.chevron_right),
       onTap: () async {
         await NotificationHelper.openFullScreenIntentSettings();
+        await _refresh();
+      },
+    );
+  }
+}
+
+class _OverlayAccessTile extends ConsumerStatefulWidget {
+  const _OverlayAccessTile();
+
+  @override
+  ConsumerState<_OverlayAccessTile> createState() =>
+      _OverlayAccessTileState();
+}
+
+class _OverlayAccessTileState extends ConsumerState<_OverlayAccessTile>
+    with WidgetsBindingObserver {
+  bool? _canOverlay;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _refresh();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _refresh();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  Future<void> _refresh() async {
+    final can = await NotificationHelper.canDrawOverlays();
+    if (mounted) setState(() => _canOverlay = can);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isGlass = isGlassTheme(context);
+    final subtitle = switch (_canOverlay) {
+      true => 'Allowed — alarms open full screen even when the app is closed',
+      false =>
+        'Restricted — grant display-over-apps so alarms take over the screen instantly',
+      null => 'Checking…',
+    };
+    return ListTile(
+      title: const Text('Display over other apps'),
+      subtitle: Text(subtitle),
+      leading: Icon(
+        _canOverlay == true
+            ? Icons.verified_outlined
+            : Icons.warning_amber_outlined,
+        color: isGlass ? GlassColors.textMuted : null,
+      ),
+      trailing: const Icon(Icons.chevron_right),
+      onTap: () async {
+        await NotificationHelper.openOverlaySettings();
         await _refresh();
       },
     );

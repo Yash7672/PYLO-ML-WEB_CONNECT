@@ -50,17 +50,24 @@ class _CloudSetupHelpScreenState extends State<CloudSetupHelpScreen> {
           ),
           _stepRow(
             'Step 4',
+            'In the dashboard, go to Authentication → Sign In / Providers → '
+            'Email. Find "Confirm email", turn it OFF and click Save — new '
+            'accounts can then sign in immediately, without having to confirm '
+            'their email first.',
+          ),
+          _stepRow(
+            'Step 5',
             'Open SQL Editor, then paste and run the blocks below — Start with '
-            'Step 5, then Step 6, then Step 7.',
+            'Step 6, then Step 7, then Step 8.',
           ),
           const SizedBox(height: 16),
-          _sqlBlock(context, 'Step 5', 'Create profiles table',
+          _sqlBlock(context, 'Step 6', 'Create profiles table',
               createProfilesTableSql),
           const SizedBox(height: 16),
-          _sqlBlock(context, 'Step 6', 'Create daily_data table',
+          _sqlBlock(context, 'Step 7', 'Create daily_data table',
               createDailyDataTableSql),
           const SizedBox(height: 16),
-          _sqlBlock(context, 'Step 7', 'Enable RLS + policies',
+          _sqlBlock(context, 'Step 8', 'Enable RLS + policies',
               enableRlsAndPoliciesSql),
         ],
       ),
