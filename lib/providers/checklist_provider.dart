@@ -50,6 +50,21 @@ class ChecklistNotifier extends StateNotifier<ChecklistsState> {
     return result;
   }
 
+  /// Fire-and-forget write for a drag-and-drop reorder. Runs inside the same
+  /// mutation queue as every other write; if it fails the in-memory order is
+  /// replaced by what SQLite actually holds so the screen never lies about
+  /// what is persisted.
+  Future<void> _saveOrder(Future<void> Function() write) {
+    return _runExclusive(() async {
+      try {
+        await write();
+      } catch (e) {
+        debugPrint('Error saving list order: $e');
+        await loadChecklists();
+      }
+    });
+  }
+
   ChecklistNotifier(this.dbHelper) : super(const ChecklistsState()) {
     loadChecklists();
   }
@@ -88,8 +103,18 @@ class ChecklistNotifier extends StateNotifier<ChecklistsState> {
   Future<Checklist?> createChecklist(String title) async {
     return _runExclusive(() async {
       try {
-        final checklist =
-            await dbHelper.createChecklist(Checklist(title: title));
+        // New lists stay at the top of the screen (the historic behaviour),
+        // so they must sort BEFORE every existing one: positions only move
+        // down when the user drags a list.
+        final current = state.checklists;
+        final nextPosition = current.isEmpty
+            ? 0
+            : current
+                    .map((c) => c.position)
+                    .reduce((a, b) => a < b ? a : b) -
+                1;
+        final checklist = await dbHelper.createChecklist(
+            Checklist(title: title, position: nextPosition));
         state = ChecklistsState(
           checklists: [checklist, ...state.checklists],
           items: {...state.items, checklist.id: []},
@@ -117,6 +142,48 @@ class ChecklistNotifier extends StateNotifier<ChecklistsState> {
         debugPrint('Error renaming checklist: $e');
       }
     });
+  }
+
+  /// Reorders the PARENT lists after a long-press drag and persists the new
+  /// order to SQLite. The moved list carries its whole group with it: the
+  /// sublists are keyed by `checklistId` in [ChecklistsState.items], so only
+  /// the parent rows are ever re-sequenced here.
+  ///
+  /// [oldIndex] / [newIndex] come from `ReorderableListView.onReorderItem`,
+  /// where [newIndex] already accounts for the removed row.
+  ///
+  /// The in-memory order updates synchronously (so the drop animates without
+  /// a hitch); the returned future completes once SQLite has the new order.
+  Future<void> reorderChecklists(int oldIndex, int newIndex) async {
+    final current = [...state.checklists];
+    if (oldIndex < 0 || oldIndex >= current.length) return;
+    if (newIndex < 0 || newIndex >= current.length) return;
+    if (oldIndex == newIndex) return;
+
+    final moved = current.removeAt(oldIndex);
+    current.insert(newIndex, moved);
+
+    // Re-stamp `position` on every row so the in-memory models always match
+    // SQLite: other operations (rename, undo) write the whole row back and
+    // would otherwise resurrect the pre-drag order. updatedAt is deliberately
+    // untouched — reordering is not a content edit.
+    final reordered = <Checklist>[];
+    for (var i = 0; i < current.length; i++) {
+      final c = current[i];
+      reordered.add(Checklist(
+        id: c.id,
+        title: c.title,
+        createdAt: c.createdAt,
+        updatedAt: c.updatedAt,
+        position: i,
+      ));
+    }
+
+    state = ChecklistsState(checklists: reordered, items: state.items);
+    _updateChecklistWidget();
+
+    final orderedIds = reordered.map((c) => c.id).toList();
+    await _saveOrder(() => dbHelper.updateChecklistPositions(orderedIds));
   }
 
   /// Deletes a checklist but first snapshots the checklist and its items from
@@ -272,6 +339,44 @@ class ChecklistNotifier extends StateNotifier<ChecklistsState> {
         debugPrint('Error updating checklist item: $e');
       }
     });
+  }
+
+  /// Reorders the items (sublists) of ONE checklist after a long-press drag
+  /// and persists their `position`. Everything is scoped to [checklistId] —
+  /// both the in-memory list and the SQL write — so an item can never hop
+  /// into another parent list.
+  ///
+  /// [oldIndex] / [newIndex] come from `ReorderableListView.onReorderItem`,
+  /// where [newIndex] already accounts for the removed row.
+  ///
+  /// The in-memory order updates synchronously; the returned future completes
+  /// once SQLite has the new order.
+  Future<void> reorderItems(String checklistId, int oldIndex, int newIndex) async {
+    final current = [
+      ...(state.items[checklistId] ?? const <ChecklistItem>[]),
+    ];
+    if (oldIndex < 0 || oldIndex >= current.length) return;
+    if (newIndex < 0 || newIndex >= current.length) return;
+    if (oldIndex == newIndex) return;
+
+    final moved = current.removeAt(oldIndex);
+    current.insert(newIndex, moved);
+
+    // Renumber 0..n-1 so the stored positions stay contiguous and a freshly
+    // added item (max + 1) still lands at the very end.
+    final reordered = [
+      for (var i = 0; i < current.length; i++)
+        current[i].copyWith(position: i),
+    ];
+
+    final items = {...state.items};
+    items[checklistId] = reordered;
+    state = ChecklistsState(checklists: state.checklists, items: items);
+    _updateChecklistWidget();
+
+    final orderedIds = reordered.map((i) => i.id).toList();
+    await _saveOrder(
+        () => dbHelper.updateChecklistItemPositions(checklistId, orderedIds));
   }
 
   void _upsertItem(ChecklistItem item) {

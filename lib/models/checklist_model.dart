@@ -6,11 +6,17 @@ class Checklist {
   final DateTime createdAt;
   final DateTime updatedAt;
 
+  /// Display order among the parent lists (lower sorts first). Persisted in
+  /// SQLite so a drag-and-drop reorder survives an app restart. Legacy rows
+  /// without a stored value read as 0.
+  final int position;
+
   Checklist({
     String? id,
     required this.title,
     DateTime? createdAt,
     DateTime? updatedAt,
+    this.position = 0,
   })  : id = id ?? const Uuid().v4(),
         createdAt = createdAt ?? DateTime.now(),
         updatedAt = updatedAt ?? DateTime.now();
@@ -20,12 +26,14 @@ class Checklist {
     String? title,
     DateTime? createdAt,
     DateTime? updatedAt,
+    int? position,
   }) {
     return Checklist(
       id: id ?? this.id,
       title: title ?? this.title,
       createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? DateTime.now(),
+      position: position ?? this.position,
     );
   }
 
@@ -34,6 +42,7 @@ class Checklist {
         'title': title,
         'createdAt': createdAt.millisecondsSinceEpoch,
         'updatedAt': updatedAt.millisecondsSinceEpoch,
+        'position': position,
       };
 
   factory Checklist.fromMap(Map<String, dynamic> map) {
@@ -46,6 +55,7 @@ class Checklist {
       updatedAt: map['updatedAt'] != null
           ? DateTime.fromMillisecondsSinceEpoch(map['updatedAt'])
           : DateTime.now(),
+      position: (map['position'] as num?)?.toInt() ?? 0,
     );
   }
 }

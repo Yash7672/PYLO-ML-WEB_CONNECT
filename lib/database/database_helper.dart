@@ -19,7 +19,7 @@ class DatabaseHelper {
   static String? _cachedDbPath;
   static Completer<void>? _dbInitCompleter;
 
-  static const int schemaVersion = 12;
+  static const int schemaVersion = 13;
 
   /// Test hook: when set, all database paths resolve here instead of the
   /// production `taskflow.db`. Lets each parallel test isolate own a private
@@ -216,6 +216,35 @@ class DatabaseHelper {
         }
       }
     }
+    // v13 adds the drag-and-drop ordering column to the parent checklists.
+    if (oldVersion < 13) {
+      final tables = await db.rawQuery(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'checklists'",
+      );
+      if (tables.isNotEmpty) {
+        final columns = await db.rawQuery('PRAGMA table_info(checklists)');
+        if (!columns.any((c) => c['name'] == 'position')) {
+          await db.execute(
+              'ALTER TABLE checklists ADD COLUMN position INTEGER NOT NULL DEFAULT 0');
+        }
+        // Backfill the positions from the order the app shows today
+        // (identical to the previous `updatedAt DESC` sort, so not a single
+        // list changes place on upgrade) and renumber them 0..n-1.
+        final rows = await db.query(
+          'checklists',
+          columns: ['id'],
+          orderBy: 'position ASC, updatedAt DESC',
+        );
+        await db.transaction((txn) async {
+          final batch = txn.batch();
+          for (var i = 0; i < rows.length; i++) {
+            batch.update('checklists', {'position': i},
+                where: 'id = ?', whereArgs: [rows[i]['id']]);
+          }
+          await batch.commit(noResult: true);
+        });
+      }
+    }
     // Indexes must run AFTER every table exists: on upgrade paths the
     // checklist_items / focus_sessions tables are only created in v5.
     if (oldVersion > 0 && oldVersion < schemaVersion) {
@@ -346,7 +375,8 @@ class DatabaseHelper {
         id TEXT PRIMARY KEY,
         title TEXT NOT NULL,
         createdAt INTEGER,
-        updatedAt INTEGER
+        updatedAt INTEGER,
+        position INTEGER NOT NULL DEFAULT 0
       )
     ''');
 
@@ -890,7 +920,11 @@ class DatabaseHelper {
 
   Future<List<Checklist>> getAllChecklists() async {
     final db = await database;
-    final result = await db.query('checklists', orderBy: 'updatedAt DESC');
+    // `position` is the drag-and-drop order; `updatedAt DESC` only breaks ties
+    // (legacy rows restored from a backup that predates the column) so those
+    // keep the historic "most recently edited first" order.
+    final result =
+        await db.query('checklists', orderBy: 'position ASC, updatedAt DESC');
     return result.map((json) => Checklist.fromMap(json)).toList();
   }
 
@@ -902,6 +936,21 @@ class DatabaseHelper {
       where: 'id = ?',
       whereArgs: [checklist.id],
     );
+  }
+
+  /// Persists a new display order for the PARENT lists. [orderedIds] holds
+  /// every checklist id in its on-screen order and each row stores its index
+  /// as `position`, so the drag-and-drop order survives an app restart.
+  Future<void> updateChecklistPositions(List<String> orderedIds) async {
+    final db = await database;
+    await db.transaction((txn) async {
+      final batch = txn.batch();
+      for (var i = 0; i < orderedIds.length; i++) {
+        batch.update('checklists', {'position': i},
+            where: 'id = ?', whereArgs: [orderedIds[i]]);
+      }
+      await batch.commit(noResult: true);
+    });
   }
 
   Future<int> deleteChecklist(String id) async {
@@ -957,6 +1006,24 @@ class DatabaseHelper {
     final db = await database;
     await _touchChecklist(checklistId);
     return db.delete('checklist_items', where: 'id = ?', whereArgs: [id]);
+  }
+
+  /// Persists a new display order for the items (sublists) of ONE checklist.
+  /// [orderedIds] is the on-screen order of that checklist only; the extra
+  /// `checklistId` guard makes it impossible to ever touch a row that belongs
+  /// to a different parent list.
+  Future<void> updateChecklistItemPositions(
+      String checklistId, List<String> orderedIds) async {
+    final db = await database;
+    await db.transaction((txn) async {
+      final batch = txn.batch();
+      for (var i = 0; i < orderedIds.length; i++) {
+        batch.update('checklist_items', {'position': i},
+            where: 'id = ? AND checklistId = ?',
+            whereArgs: [orderedIds[i], checklistId]);
+      }
+      await batch.commit(noResult: true);
+    });
   }
 
   Future<void> _touchChecklist(String checklistId) async {

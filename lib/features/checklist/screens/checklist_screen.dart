@@ -10,6 +10,29 @@ import '../../../models/checklist_model.dart';
 import '../../../providers/checklist_provider.dart';
 import '../widgets/checklist_item.dart';
 
+/// Visual feedback while a row is being dragged: the row lifts off the
+/// surface (drop shadow) and scales up slightly so it is always obvious which
+/// item is moving. It exists only for the duration of a drag — the resting
+/// design, colours and layout are untouched.
+Widget dragRowProxy(Widget child, int index, Animation<double> animation) {
+  return AnimatedBuilder(
+    animation: animation,
+    builder: (context, _) {
+      final t = Curves.easeOutCubic.transform(animation.value);
+      return Material(
+        color: Colors.transparent,
+        elevation: 8 * t,
+        shadowColor: Colors.black45,
+        child: Transform.scale(
+          scale: 1.0 + 0.02 * t,
+          alignment: Alignment.center,
+          child: child,
+        ),
+      );
+    },
+  );
+}
+
 class ChecklistScreen extends ConsumerWidget {
   const ChecklistScreen({super.key});
 
@@ -70,14 +93,22 @@ class ChecklistScreen extends ConsumerWidget {
                 ),
               ),
             )
-          : ListView.builder(
+          : ReorderableListView.builder(
               padding: const EdgeInsets.all(16),
               itemCount: state.checklists.length,
+              // Long-press + drag reorders the parent list; the whole group
+              // (its sublists) moves with it because items are keyed by the
+              // parent's id.
+              onReorderItem: (oldIndex, newIndex) => ref
+                  .read(checklistProvider.notifier)
+                  .reorderChecklists(oldIndex, newIndex),
+              proxyDecorator: dragRowProxy,
               itemBuilder: (context, index) {
                 final checklist = state.checklists[index];
                 final (done, total) =
                     totals[checklist.id] ?? const (0, 0);
                 return Card(
+                  key: ValueKey(checklist.id),
                   margin: const EdgeInsets.only(bottom: 10),
                   child: ListTile(
                     shape: RoundedRectangleBorder(
@@ -99,17 +130,43 @@ class ChecklistScreen extends ConsumerWidget {
                             minHeight: 4,
                             borderRadius: BorderRadius.circular(2),
                           ),
-                    trailing: PopupMenuButton<String>(
-                      onSelected: (value) {
-                        if (value == 'rename') {
-                          _showRenameDialog(context, ref, checklist);
-                        } else if (value == 'delete') {
-                          _confirmDelete(context, ref, checklist);
-                        }
-                      },
-                      itemBuilder: (context) => const [
-                        PopupMenuItem(value: 'rename', child: Text('Rename')),
-                        PopupMenuItem(value: 'delete', child: Text('Delete')),
+                    // The existing menu is untouched; the move controls sit
+                    // immediately to its right so a list can be reordered
+                    // one step at a time without dragging.
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        PopupMenuButton<String>(
+                          onSelected: (value) {
+                            if (value == 'rename') {
+                              _showRenameDialog(context, ref, checklist);
+                            } else if (value == 'delete') {
+                              _confirmDelete(context, ref, checklist);
+                            }
+                          },
+                          itemBuilder: (context) => const [
+                            PopupMenuItem(value: 'rename', child: Text('Rename')),
+                            PopupMenuItem(value: 'delete', child: Text('Delete')),
+                          ],
+                        ),
+                        _MoveListButton(
+                          tooltip: 'Move up',
+                          icon: Icons.arrow_upward,
+                          // First row has nothing above it to move into.
+                          enabled: index > 0,
+                          onPressed: () => ref
+                              .read(checklistProvider.notifier)
+                              .reorderChecklists(index, index - 1),
+                        ),
+                        _MoveListButton(
+                          tooltip: 'Move down',
+                          icon: Icons.arrow_downward,
+                          // Last row has nothing below it to move into.
+                          enabled: index < state.checklists.length - 1,
+                          onPressed: () => ref
+                              .read(checklistProvider.notifier)
+                              .reorderChecklists(index, index + 1),
+                        ),
                       ],
                     ),
                     onTap: () => _openDetail(context, checklist),
@@ -226,6 +283,38 @@ class ChecklistScreen extends ConsumerWidget {
   }
 }
 
+/// Up / Down control that moves a list exactly one position in the Lists
+/// screen. The button is disabled (greyed out and untappable) on the first
+/// row for Up and on the last row for Down, so it can never be pressed into
+/// an invalid position. Kept compact so the menu plus both arrows still fit
+/// beside the title on a narrow phone screen.
+class _MoveListButton extends StatelessWidget {
+  const _MoveListButton({
+    required this.tooltip,
+    required this.icon,
+    required this.enabled,
+    required this.onPressed,
+  });
+
+  final String tooltip;
+  final IconData icon;
+  final bool enabled;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return IconButton(
+      tooltip: tooltip,
+      onPressed: enabled ? onPressed : null,
+      icon: Icon(icon, size: 20),
+      constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+      padding: EdgeInsets.zero,
+      visualDensity: VisualDensity.compact,
+      color: enabled ? Theme.of(context).colorScheme.primary : null,
+    );
+  }
+}
+
 class ChecklistDetailScreen extends ConsumerStatefulWidget {
   final Checklist checklist;
 
@@ -283,12 +372,22 @@ class _ChecklistDetailScreenState extends ConsumerState<ChecklistDetailScreen> {
                 ? Center(
                     child: Text('Add your first item below.',
                         style: TextStyle(color: glassSecondaryText(context))))
-                : ListView.builder(
+                : ReorderableListView.builder(
                     padding: const EdgeInsets.all(8),
                     itemCount: items.length,
+                    // Scoped to THIS checklist's id only: a drag can reorder
+                    // rows inside this list but can never move an item into
+                    // another parent list.
+                    onReorderItem: (oldIndex, newIndex) => ref
+                        .read(checklistProvider.notifier)
+                        .reorderItems(widget.checklist.id, oldIndex, newIndex),
+                    proxyDecorator: dragRowProxy,
                     itemBuilder: (context, index) {
                       final item = items[index];
-                      return ChecklistItemTile(item: item);
+                      return ChecklistItemTile(
+                        key: ValueKey(item.id),
+                        item: item,
+                      );
                     },
                   ),
           ),
