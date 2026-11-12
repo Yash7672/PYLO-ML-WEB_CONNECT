@@ -7,6 +7,7 @@ import 'package:path/path.dart' as p;
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:task_app/database/database_helper.dart';
 import 'package:task_app/features/checklist/screens/checklist_screen.dart';
+import 'package:task_app/features/checklist/widgets/move_arrows.dart';
 import 'package:task_app/models/checklist_model.dart';
 import 'package:task_app/providers/checklist_provider.dart';
 import 'package:task_app/providers/database_provider.dart';
@@ -359,6 +360,27 @@ void main() {
 
   // ── Up / Down buttons (reorder without dragging) ──────────────────────────
 
+  testWidgets('the Up / Down pair sits side by side and stays compact',
+      (tester) async {
+    await seedDemo();
+
+    await tester.pumpWidget(ProviderScope(
+      overrides: [databaseProvider.overrideWithValue(db)],
+      child: const MaterialApp(home: ChecklistScreen()),
+    ));
+    await tester.pumpAndSettle();
+
+    // Both arrows live in ONE row and together are narrower than the two
+    // separate 40px buttons they replaced.
+    final arrows = tester.widgetList<MoveArrows>(find.byType(MoveArrows));
+    expect(arrows, hasLength(3), reason: 'one pair per list row');
+
+    final size = tester.getSize(find.byType(MoveArrows).first);
+    expect(size.width, lessThanOrEqualTo(64),
+        reason: 'the pair must stay compact beside the menu');
+    expect(size.height, lessThanOrEqualTo(32));
+  });
+
   testWidgets('Up is disabled on the first list, Down on the last list',
       (tester) async {
     await seedDemo();
@@ -420,6 +442,139 @@ void main() {
     expect((await db.getAllChecklists()).map((l) => l.title).toList(),
         ['Shopping', 'Bike', 'Study'],
         reason: 'and that order is persisted too');
+  });
+
+  // ── Up / Down buttons inside a list (item rows) ───────────────────────────
+
+  testWidgets('item Up is disabled on the first row, Down on the last row',
+      (tester) async {
+    await seedDemo();
+
+    await tester.pumpWidget(ProviderScope(
+      overrides: [databaseProvider.overrideWithValue(db)],
+      child: const MaterialApp(home: ChecklistScreen()),
+    ));
+    await tester.pumpAndSettle();
+
+    // Open the Bike list: Cycle / Repair / Service.
+    await tester.tap(find.text('Bike'));
+    await tester.pumpAndSettle();
+
+    expect(tester.widget<IconButton>(moveButton('Cycle', 'Move up')).onPressed,
+        isNull,
+        reason: 'the first item has nothing above it to move into');
+    expect(
+        tester.widget<IconButton>(moveButton('Cycle', 'Move down')).onPressed,
+        isNotNull,
+        reason: 'the first item can move down');
+    expect(tester.widget<IconButton>(moveButton('Service', 'Move up')).onPressed,
+        isNotNull,
+        reason: 'the last item can move up');
+    expect(
+        tester.widget<IconButton>(moveButton('Service', 'Move down')).onPressed,
+        isNull,
+        reason: 'the last item has nothing below it to move into');
+    // The middle row can move both ways.
+    expect(
+        tester.widget<IconButton>(moveButton('Repair', 'Move up')).onPressed,
+        isNotNull);
+    expect(
+        tester.widget<IconButton>(moveButton('Repair', 'Move down')).onPressed,
+        isNotNull);
+  });
+
+  testWidgets('item Down then Up move an item one position and persist',
+      (tester) async {
+    await seedDemo();
+
+    await tester.pumpWidget(ProviderScope(
+      overrides: [databaseProvider.overrideWithValue(db)],
+      child: const MaterialApp(home: ChecklistScreen()),
+    ));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Bike'));
+    await tester.pumpAndSettle();
+
+    expect(orderOf(tester, const ['Cycle', 'Repair', 'Service']),
+        ['Cycle', 'Repair', 'Service']);
+
+    await tester.tap(moveButton('Cycle', 'Move down'));
+    await tester.pumpAndSettle();
+
+    expect(orderOf(tester, const ['Cycle', 'Repair', 'Service']),
+        ['Repair', 'Cycle', 'Service'],
+        reason: 'Down moves the item exactly one position');
+
+    await flushWrites(tester);
+    expect((await db.getChecklistItems('l2')).map((i) => i.text).toList(),
+        ['Repair', 'Cycle', 'Service'],
+        reason: 'the new item order is written to SQLite');
+
+    await tester.tap(moveButton('Cycle', 'Move up'));
+    await tester.pumpAndSettle();
+
+    expect(orderOf(tester, const ['Cycle', 'Repair', 'Service']),
+        ['Cycle', 'Repair', 'Service'],
+        reason: 'Up moves the item back exactly one position');
+
+    await flushWrites(tester);
+    expect((await db.getChecklistItems('l2')).map((i) => i.text).toList(),
+        ['Cycle', 'Repair', 'Service'],
+        reason: 'and that item order is persisted too');
+  });
+
+  testWidgets('the item arrows never move an item into another list',
+      (tester) async {
+    await seedDemo();
+
+    await tester.pumpWidget(ProviderScope(
+      overrides: [databaseProvider.overrideWithValue(db)],
+      child: const MaterialApp(home: ChecklistScreen()),
+    ));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Bike'));
+    await tester.pumpAndSettle();
+
+    // Both arrows of the last item are inert: no state change, no write.
+    await tester.tap(moveButton('Service', 'Move down'), warnIfMissed: false);
+    await tester.pumpAndSettle();
+    await flushWrites(tester);
+
+    expect(orderOf(tester, const ['Cycle', 'Repair', 'Service']),
+        ['Cycle', 'Repair', 'Service']);
+    expect((await db.getChecklistItems('l2')).map((i) => i.text).toList(),
+        ['Cycle', 'Repair', 'Service']);
+    // The other parent list is untouched too.
+    expect((await db.getChecklistItems('l1')).map((i) => i.text).toList(),
+        ['Book', 'Bag']);
+  });
+
+  testWidgets('item row with Edit + arrows fits a 320px phone without overflow',
+      (tester) async {
+    await seedDemo();
+
+    // A very narrow old-school phone: the row must not overflow even with
+    // three trailing controls (Edit, Up, Down).
+    tester.view.physicalSize = const Size(320, 640);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    await tester.pumpWidget(ProviderScope(
+      overrides: [databaseProvider.overrideWithValue(db)],
+      child: const MaterialApp(home: ChecklistScreen()),
+    ));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Bike'));
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull,
+        reason: 'the Edit + Up + Down group must not overflow the row');
+    // The item text is still visible, not squeezed out by the controls.
+    expect(find.text('Cycle'), findsOneWidget);
+    expect(find.text('Service'), findsOneWidget);
   });
 }
 

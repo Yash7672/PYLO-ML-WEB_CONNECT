@@ -7,11 +7,22 @@ import '../../../core/widgets/glass_components.dart';
 import '../../../models/checklist_model.dart';
 import '../../../providers/checklist_provider.dart';
 import '../../../theme/app_theme.dart';
+import 'move_arrows.dart';
 
 class ChecklistItemTile extends ConsumerWidget {
   final ChecklistItem item;
 
-  const ChecklistItemTile({super.key, required this.item});
+  /// Position of this row inside its parent list plus the list length, so
+  /// the ↑ / ↓ pair can grey itself out on the first / last row.
+  final int index;
+  final int itemCount;
+
+  const ChecklistItemTile({
+    super.key,
+    required this.item,
+    required this.index,
+    required this.itemCount,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -56,9 +67,28 @@ class ChecklistItemTile extends ConsumerWidget {
         ),
         onChanged: (_) =>
             ref.read(checklistProvider.notifier).toggleItem(item),
-        secondary: IconButton(
-          icon: const Icon(Icons.edit_outlined, size: 20),
-          onPressed: () => _editItem(context, ref),
+        // Keep the existing Edit button and put the compact ↑ / ↓ pair
+        // right beside it, exactly like on the Lists page.
+        secondary: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            IconButton(
+              icon: const Icon(Icons.edit_outlined, size: 20),
+              onPressed: () => _editItem(context, ref),
+            ),
+            MoveArrows(
+              // First row has nothing above it to move into; last row
+              // has nothing below it.
+              canMoveUp: index > 0,
+              canMoveDown: index < itemCount - 1,
+              onMoveUp: () => ref
+                  .read(checklistProvider.notifier)
+                  .reorderItems(item.checklistId, index, index - 1),
+              onMoveDown: () => ref
+                  .read(checklistProvider.notifier)
+                  .reorderItems(item.checklistId, index, index + 1),
+            ),
+          ],
         ),
       ),
     );
