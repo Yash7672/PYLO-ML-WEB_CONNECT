@@ -9,7 +9,7 @@ import '../../../core/widgets/glass_components.dart';
 import '../../../models/checklist_model.dart';
 import '../../../providers/checklist_provider.dart';
 import '../widgets/checklist_item.dart';
-import '../widgets/move_arrows.dart';
+import '../widgets/reorder_button.dart';
 
 /// Visual feedback while a row is being dragged: the row lifts off the
 /// surface (drop shadow) and scales up slightly so it is always obvious which
@@ -131,7 +131,7 @@ class ChecklistScreen extends ConsumerWidget {
                             minHeight: 4,
                             borderRadius: BorderRadius.circular(2),
                           ),
-                    // The existing menu is untouched; the compact ↑ / ↓ pair
+                    // The existing menu is untouched; the single swap glyph
                     // sits immediately to its right so a list can be
                     // reordered one step at a time without dragging.
                     trailing: Row(
@@ -150,7 +150,7 @@ class ChecklistScreen extends ConsumerWidget {
                             PopupMenuItem(value: 'delete', child: Text('Delete')),
                           ],
                         ),
-                        MoveArrows(
+                        ReorderButton(
                           // First row has nothing above it to move into;
                           // last row has nothing below it.
                           canMoveUp: index > 0,

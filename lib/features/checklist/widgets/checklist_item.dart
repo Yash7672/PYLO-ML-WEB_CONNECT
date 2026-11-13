@@ -7,7 +7,7 @@ import '../../../core/widgets/glass_components.dart';
 import '../../../models/checklist_model.dart';
 import '../../../providers/checklist_provider.dart';
 import '../../../theme/app_theme.dart';
-import 'move_arrows.dart';
+import 'reorder_button.dart';
 
 class ChecklistItemTile extends ConsumerWidget {
   final ChecklistItem item;
@@ -67,7 +67,7 @@ class ChecklistItemTile extends ConsumerWidget {
         ),
         onChanged: (_) =>
             ref.read(checklistProvider.notifier).toggleItem(item),
-        // Keep the existing Edit button and put the compact ↑ / ↓ pair
+        // Keep the existing Edit button and put the single swap glyph
         // right beside it, exactly like on the Lists page.
         secondary: Row(
           mainAxisSize: MainAxisSize.min,
@@ -76,7 +76,7 @@ class ChecklistItemTile extends ConsumerWidget {
               icon: const Icon(Icons.edit_outlined, size: 20),
               onPressed: () => _editItem(context, ref),
             ),
-            MoveArrows(
+            ReorderButton(
               // First row has nothing above it to move into; last row
               // has nothing below it.
               canMoveUp: index > 0,

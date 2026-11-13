@@ -7,7 +7,7 @@ import 'package:path/path.dart' as p;
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:task_app/database/database_helper.dart';
 import 'package:task_app/features/checklist/screens/checklist_screen.dart';
-import 'package:task_app/features/checklist/widgets/move_arrows.dart';
+import 'package:task_app/features/checklist/widgets/reorder_button.dart';
 import 'package:task_app/models/checklist_model.dart';
 import 'package:task_app/providers/checklist_provider.dart';
 import 'package:task_app/providers/database_provider.dart';
@@ -358,9 +358,9 @@ void main() {
     expect(shopping.map((item) => item.text).toList(), ['Book', 'Bag']);
   });
 
-  // ── Up / Down buttons (reorder without dragging) ──────────────────────────
+  // ── Single swap button (reorder without dragging) ─────────────────────────
 
-  testWidgets('the Up / Down pair sits side by side and stays compact',
+  testWidgets('the reorder control is a single compact swap button',
       (tester) async {
     await seedDemo();
 
@@ -370,18 +370,25 @@ void main() {
     ));
     await tester.pumpAndSettle();
 
-    // Both arrows live in ONE row and together are narrower than the two
-    // separate 40px buttons they replaced.
-    final arrows = tester.widgetList<MoveArrows>(find.byType(MoveArrows));
-    expect(arrows, hasLength(3), reason: 'one pair per list row');
+    // One control per row, drawn with the single-stem swap glyph rather
+    // than the two separate arrows it replaced.
+    final buttons =
+        tester.widgetList<ReorderButton>(find.byType(ReorderButton));
+    expect(buttons, hasLength(3), reason: 'one control per list row');
+    expect(find.byIcon(Icons.height), findsNWidgets(3),
+        reason: 'each row shows exactly one swap glyph');
+    expect(find.byIcon(Icons.arrow_upward), findsNothing,
+        reason: 'the separate Up arrow is gone');
+    expect(find.byIcon(Icons.arrow_downward), findsNothing,
+        reason: 'the separate Down arrow is gone');
 
-    final size = tester.getSize(find.byType(MoveArrows).first);
+    final size = tester.getSize(find.byType(ReorderButton).first);
     expect(size.width, lessThanOrEqualTo(64),
-        reason: 'the pair must stay compact beside the menu');
+        reason: 'the control must stay compact beside the menu');
     expect(size.height, lessThanOrEqualTo(32));
   });
 
-  testWidgets('Up is disabled on the first list, Down on the last list',
+  testWidgets('Move up is disabled on the first list, Move down on the last',
       (tester) async {
     await seedDemo();
 
@@ -391,19 +398,27 @@ void main() {
     ));
     await tester.pumpAndSettle();
 
-    expect(tester.widget<IconButton>(moveButton('Shopping', 'Move up')).onPressed,
-        isNull,
+    // The button stays live on every row — the unavailable direction is
+    // greyed out inside its menu instead.
+    await openMoveMenu(tester, 'Shopping');
+    expect(menuEnabled(tester, 'Move up'), isFalse,
         reason: 'the first list has nothing above it to move into');
-    expect(
-        tester.widget<IconButton>(moveButton('Shopping', 'Move down')).onPressed,
-        isNotNull,
+    expect(menuEnabled(tester, 'Move down'), isTrue,
         reason: 'the first list can move down');
-    expect(tester.widget<IconButton>(moveButton('Study', 'Move up')).onPressed,
-        isNotNull,
+    await closeMoveMenu(tester);
+
+    await openMoveMenu(tester, 'Study');
+    expect(menuEnabled(tester, 'Move up'), isTrue,
         reason: 'the last list can move up');
-    expect(tester.widget<IconButton>(moveButton('Study', 'Move down')).onPressed,
-        isNull,
+    expect(menuEnabled(tester, 'Move down'), isFalse,
         reason: 'the last list has nothing below it to move into');
+    await closeMoveMenu(tester);
+
+    // The middle list can move both ways.
+    await openMoveMenu(tester, 'Bike');
+    expect(menuEnabled(tester, 'Move up'), isTrue);
+    expect(menuEnabled(tester, 'Move down'), isTrue);
+    await closeMoveMenu(tester);
   });
 
   testWidgets('Down then Up move a list one position and persist',
@@ -419,7 +434,8 @@ void main() {
     expect(orderOf(tester, const ['Shopping', 'Bike', 'Study']),
         ['Shopping', 'Bike', 'Study']);
 
-    await tester.tap(moveButton('Shopping', 'Move down'));
+    await openMoveMenu(tester, 'Shopping');
+    await tester.tap(find.text('Move down'));
     await tester.pumpAndSettle();
 
     expect(orderOf(tester, const ['Shopping', 'Bike', 'Study']),
@@ -431,7 +447,8 @@ void main() {
         ['Bike', 'Shopping', 'Study'],
         reason: 'the new order is written to SQLite');
 
-    await tester.tap(moveButton('Shopping', 'Move up'));
+    await openMoveMenu(tester, 'Shopping');
+    await tester.tap(find.text('Move up'));
     await tester.pumpAndSettle();
 
     expect(orderOf(tester, const ['Shopping', 'Bike', 'Study']),
@@ -444,9 +461,9 @@ void main() {
         reason: 'and that order is persisted too');
   });
 
-  // ── Up / Down buttons inside a list (item rows) ───────────────────────────
+  // ── Swap button inside a list (item rows) ─────────────────────────────────
 
-  testWidgets('item Up is disabled on the first row, Down on the last row',
+  testWidgets('item Move up is disabled on the first row, Move down on the last',
       (tester) async {
     await seedDemo();
 
@@ -460,27 +477,25 @@ void main() {
     await tester.tap(find.text('Bike'));
     await tester.pumpAndSettle();
 
-    expect(tester.widget<IconButton>(moveButton('Cycle', 'Move up')).onPressed,
-        isNull,
+    await openMoveMenu(tester, 'Cycle');
+    expect(menuEnabled(tester, 'Move up'), isFalse,
         reason: 'the first item has nothing above it to move into');
-    expect(
-        tester.widget<IconButton>(moveButton('Cycle', 'Move down')).onPressed,
-        isNotNull,
+    expect(menuEnabled(tester, 'Move down'), isTrue,
         reason: 'the first item can move down');
-    expect(tester.widget<IconButton>(moveButton('Service', 'Move up')).onPressed,
-        isNotNull,
+    await closeMoveMenu(tester);
+
+    await openMoveMenu(tester, 'Service');
+    expect(menuEnabled(tester, 'Move up'), isTrue,
         reason: 'the last item can move up');
-    expect(
-        tester.widget<IconButton>(moveButton('Service', 'Move down')).onPressed,
-        isNull,
+    expect(menuEnabled(tester, 'Move down'), isFalse,
         reason: 'the last item has nothing below it to move into');
+    await closeMoveMenu(tester);
+
     // The middle row can move both ways.
-    expect(
-        tester.widget<IconButton>(moveButton('Repair', 'Move up')).onPressed,
-        isNotNull);
-    expect(
-        tester.widget<IconButton>(moveButton('Repair', 'Move down')).onPressed,
-        isNotNull);
+    await openMoveMenu(tester, 'Repair');
+    expect(menuEnabled(tester, 'Move up'), isTrue);
+    expect(menuEnabled(tester, 'Move down'), isTrue);
+    await closeMoveMenu(tester);
   });
 
   testWidgets('item Down then Up move an item one position and persist',
@@ -499,7 +514,8 @@ void main() {
     expect(orderOf(tester, const ['Cycle', 'Repair', 'Service']),
         ['Cycle', 'Repair', 'Service']);
 
-    await tester.tap(moveButton('Cycle', 'Move down'));
+    await openMoveMenu(tester, 'Cycle');
+    await tester.tap(find.text('Move down'));
     await tester.pumpAndSettle();
 
     expect(orderOf(tester, const ['Cycle', 'Repair', 'Service']),
@@ -511,7 +527,8 @@ void main() {
         ['Repair', 'Cycle', 'Service'],
         reason: 'the new item order is written to SQLite');
 
-    await tester.tap(moveButton('Cycle', 'Move up'));
+    await openMoveMenu(tester, 'Cycle');
+    await tester.tap(find.text('Move up'));
     await tester.pumpAndSettle();
 
     expect(orderOf(tester, const ['Cycle', 'Repair', 'Service']),
@@ -524,7 +541,7 @@ void main() {
         reason: 'and that item order is persisted too');
   });
 
-  testWidgets('the item arrows never move an item into another list',
+  testWidgets('the item menu never moves an item into another list',
       (tester) async {
     await seedDemo();
 
@@ -537,9 +554,15 @@ void main() {
     await tester.tap(find.text('Bike'));
     await tester.pumpAndSettle();
 
-    // Both arrows of the last item are inert: no state change, no write.
-    await tester.tap(moveButton('Service', 'Move down'), warnIfMissed: false);
+    // The last row's Move down entry is disabled, so choosing it is a no-op:
+    // no state change, no write. A disabled entry also leaves the menu open,
+    // so dismiss it explicitly before asserting.
+    await openMoveMenu(tester, 'Service');
+    expect(menuEnabled(tester, 'Move down'), isFalse,
+        reason: 'the last item has nothing below it to move into');
+    await tester.tap(find.text('Move down'), warnIfMissed: false);
     await tester.pumpAndSettle();
+    await closeMoveMenu(tester);
     await flushWrites(tester);
 
     expect(orderOf(tester, const ['Cycle', 'Repair', 'Service']),
@@ -551,12 +574,12 @@ void main() {
         ['Book', 'Bag']);
   });
 
-  testWidgets('item row with Edit + arrows fits a 320px phone without overflow',
+  testWidgets('item row with Edit + swap button fits a 320px phone without overflow',
       (tester) async {
     await seedDemo();
 
     // A very narrow old-school phone: the row must not overflow even with
-    // three trailing controls (Edit, Up, Down).
+    // two trailing controls (Edit and the swap button).
     tester.view.physicalSize = const Size(320, 640);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.reset);
@@ -571,7 +594,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(tester.takeException(), isNull,
-        reason: 'the Edit + Up + Down group must not overflow the row');
+        reason: 'the Edit + swap group must not overflow the row');
     // The item text is still visible, not squeezed out by the controls.
     expect(find.text('Cycle'), findsOneWidget);
     expect(find.text('Service'), findsOneWidget);
@@ -590,12 +613,36 @@ List<String> orderOf(WidgetTester tester, List<String> labels) {
   return sorted;
 }
 
-/// The Move up / Move down button that belongs to the row showing [title].
-Finder moveButton(String title, String tooltip) => find.descendant(
+/// The reorder button that belongs to the row showing [title].
+Finder moveButton(String title) => find.descendant(
       of: find.ancestor(of: find.text(title), matching: find.byType(ListTile)),
-      matching: find.byWidgetPredicate(
-          (w) => w is IconButton && w.tooltip == tooltip),
+      matching: find.byType(ReorderButton),
     );
+
+/// Opens the Move up / Move down menu for the row showing [title].
+Future<void> openMoveMenu(WidgetTester tester, String title) async {
+  await tester.tap(moveButton(title));
+  await tester.pumpAndSettle();
+}
+
+/// Dismisses the open menu without choosing anything. The menu is anchored
+/// to its button on the right edge of the row, so a tap in the left gutter
+/// lands on the route's full-screen barrier and closes it.
+Future<void> closeMoveMenu(WidgetTester tester) async {
+  final dy = tester.getCenter(find.text('Move up')).dy;
+  await tester.tapAt(Offset(4, dy));
+  await tester.pumpAndSettle();
+}
+
+/// The Move up / Move down entry inside the open menu.
+Finder menuItem(String label) => find.ancestor(
+      of: find.text(label),
+      matching: find.byWidgetPredicate((w) => w is PopupMenuItem),
+    );
+
+/// Whether the menu entry [label] can be chosen for the current row.
+bool menuEnabled(WidgetTester tester, String label) =>
+    tester.widget<PopupMenuItem<dynamic>>(menuItem(label)).enabled;
 
 /// Long-presses [finder], drags by [offset] and drops.
 Future<void> longPressDrag(
